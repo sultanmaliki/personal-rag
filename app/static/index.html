@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Personal RAG</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Personal RAG</h1>
+      <span id="status" class="status">checking knowledge base…</span>
+    </header>
+
+    <main id="messages" class="messages"></main>
+
+    <form id="chat-form" class="chat-form">
+      <textarea id="question" placeholder="Ask about your projects or site…" rows="2" autofocus></textarea>
+      <button type="submit" id="send-btn">Send</button>
+    </form>
+  </div>
+
+  <script src="/static/chat.js"></script>
+</body>
+</html>
