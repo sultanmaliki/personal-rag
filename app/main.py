@@ -5,9 +5,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.rag import pipeline, vectorstore
@@ -91,6 +92,17 @@ class RenameRequest(BaseModel):
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def not_found_handler(request, exc: StarletteHTTPException):
+    """A stray browser navigation gets the app's own 404 page instead of a
+    bare {"detail": "Not Found"} JSON body. API clients (and tests) still
+    get the plain JSON envelope FastAPI returns by default -- only browser
+    navigations to unknown paths are affected."""
+    if exc.status_code == 404 and not request.url.path.startswith("/api/"):
+        return FileResponse(STATIC_DIR / "404.html", status_code=404)
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
 
 
 @app.get("/api/health")

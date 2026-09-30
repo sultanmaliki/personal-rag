@@ -106,3 +106,30 @@ SOURCE (GitHub repo file / web page)
   it out also shrinks the prompt-injection attack surface.
 - **Docker/CI/CD** — a personal local tool doesn't need a deployment pipeline it will never
   use.
+- **Privacy Policy, Terms & Conditions, cookie consent** — there is no visitor to disclose
+  data practices to. The only person who can reach this app is whoever is sitting at the
+  machine it's bound to (`127.0.0.1`); it sets no cookies and sends nothing to a third party.
+  Writing these documents would mean fabricating a "your data" narrative for an app with no
+  "you" but the owner.
+- **SEO (meta descriptions, Open Graph/Twitter cards, sitemap.xml, a social preview image)**
+  — none of this has an audience. The page is never crawled, never indexed, and never linked
+  to from anywhere; optimizing how it previews when shared is solving a problem this app
+  doesn't have.
+- **Analytics / event tracking / UTM parameters** — the only user is the owner. Instrumenting
+  page views or clicks would just be the owner surveilling themselves; the honest answer here
+  is "not applicable," not a dashboard built to look thorough.
+- **CDN and load balancer** — a single local FastAPI process serving one person has no
+  latency problem a CDN would fix and no traffic a load balancer would need to distribute.
+  Both would be infrastructure added for its own sake.
+- **Spam protection / CAPTCHA / rate limiting on the chat endpoint** — there's no public form
+  for a bot to abuse; the only client that can reach `/api/chat` is the one already inside
+  the same machine's network boundary as Ollama and Chroma.
+- **HTTPS/HSTS/secure cookies** — traffic never leaves the loopback interface, so there's no
+  network hop for TLS to protect. Adding it would be theater, and secure cookies don't apply
+  to an app that sets none.
+
+  If this app is ever exposed beyond `127.0.0.1` (a tunnel, a different bind address, a
+  multi-user deployment), every item above needs to be revisited for real, alongside adding
+  the authentication layer the README already calls out as a prerequisite for that move — not
+  before, since building any of them today would mean describing behavior the app doesn't
+  have.

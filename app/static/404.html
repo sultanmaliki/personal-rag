@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Not found · Personal RAG</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .not-found {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      text-align: center;
+      padding: 24px;
+    }
+    .not-found .brand-mark { width: 40px; height: 40px; color: var(--accent); opacity: 0.7; }
+    .not-found h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+    .not-found p { margin: 0; color: var(--text-muted); font-size: 14px; max-width: 380px; line-height: 1.6; }
+    .not-found a.home-link {
+      margin-top: 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 16px;
+      border-radius: var(--radius-md);
+      background: var(--accent);
+      color: white;
+      text-decoration: none;
+      font-size: 13.5px;
+      font-weight: 500;
+      transition: background 0.12s ease;
+    }
+    .not-found a.home-link:hover { background: var(--accent-hover); }
+  </style>
+</head>
+<body>
+  <div class="not-found">
+    <svg class="brand-mark" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+      <path d="M3 7l9 5 9-5M12 12v10" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+    </svg>
+    <h1>Page not found</h1>
+    <p>There's nothing at this address. This app has one page -- your chat lives there.</p>
+    <a class="home-link" href="/">Back to chat</a>
+  </div>
+</body>
+</html>

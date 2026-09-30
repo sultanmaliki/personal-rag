@@ -596,6 +596,74 @@ history rather than starting fresh).
 
 ---
 
+## 11. Production-polish audit: accessibility, mobile, and component consistency
+
+A later request asked for a full "production release audit" (design, accessibility, SEO,
+privacy policy, analytics, CDN sizing, and more) written for a public multi-tenant product.
+This app is a single-user, localhost-only tool by explicit design (see
+[ARCHITECTURE.md](ARCHITECTURE.md)'s "What's intentionally not here" section), so most of
+that brief doesn't apply — there's no visitor to write a Privacy Policy for, no traffic for a
+CDN to accelerate, no one to track with analytics. Rather than fabricate those (which the
+brief itself explicitly warned against), this pass scoped down to what's real for a local
+tool: accessibility, mobile responsiveness, component consistency, and a security/RAG
+regression check — each verified live, the same standard as every other section here.
+
+### Real bugs found via live browser testing (not caught by unit tests)
+
+| # | Bug | How it was found | Fix |
+|---|---|---|---|
+| 1 | Body text failed WCAG AA contrast: `--text-faint` (`#5c6170`) measured **2.87:1** against `--panel` and 3.19:1 against `--bg`, both under the 4.5:1 floor for normal text — and it was used for real content (the thinking trace, citations, empty state), not decoration | Computed contrast via the WCAG relative-luminance formula for every text/background pair in the palette, not eyeballed | Changed to `#7b8199` — same blue-gray tint, 4.59:1 on `--panel` / 5.1:1 on `--bg`, both passing |
+| 2 | White message-bubble text on `--accent` measured **3.53:1**, under 4.5:1 for normal-size text | Same contrast audit | Added `--accent-text-bg` (`#5a69d8`, 4.72:1 with white) used only for the user-bubble background; buttons/icons keep `--accent` since non-text UI only needs 3:1 |
+| 3 | The conversation switcher — the literal "continue where you left off" feature — was a `<div onclick>` with no `tabindex`, `role`, or keyboard handler. It never appeared in the accessibility tree's interactive-element list and had no way to reach it from a keyboard | `read_page` (accessibility tree) after opening the sidebar listed every button except the conversation itself | Rebuilt as a real `<button>`. (A delete button already lived inside the row, so the row itself stays a plain container — a `<button>` can't nest another `<button>`, that's invalid HTML — and the title text became its own `<button>` alongside the delete button) |
+| 4 | The "Thinking" disclosure toggle was the same pattern: `<div>` + click handler, unreachable by keyboard, no `aria-expanded` | Same accessibility-tree check | Converted to a real `<button>` with `aria-expanded` kept in sync on toggle |
+| 5 | The delete-conversation button only appeared on `:hover` (`display: none` by default) — meaning it was **unreachable on any touchscreen**, since touch has no hover state to reveal it with | Reasoned from the CSS, then confirmed the button is absent from touch interaction entirely (no click of any kind can reveal `display: none`) | Always rendered (`opacity` instead of `display`), visible on hover, keyboard focus, *and* under an `@media (hover: none)` query for touch devices |
+| 6 | On a fresh mobile visit (no saved preference), the sidebar defaulted open and covered ~75% of a 375px-wide screen with **no dimming backdrop and no tap-outside-to-dismiss** — the chat itself was the part squeezed into a sliver on the right | Resized the browser pane to 375×812, cleared `localStorage`, loaded fresh, screenshotted | Sidebar now defaults collapsed on first mobile visit (`matchMedia` check when no stored preference exists) and gained a dimmed scrim behind it when open, with click-to-dismiss — the standard mobile drawer pattern |
+| 7 | Pre-existing, unrelated to this round's changes: the floating "open sidebar" button (`position: fixed; top:14; left:14`) sits directly on top of the conversation title's first characters whenever the sidebar is collapsed, on *any* viewport — visible as "eryCraft tech stack" instead of "QueryCraft tech stack" in a screenshot taken at the very start of this audit | Spotted in a routine screenshot while checking overall app health, then reproduced deliberately | `.main-header` gets extra `padding-left` via a sibling selector (`.sidebar.collapsed ~ .main .main-header`) whenever the floating button is present, so it never overlaps the title again |
+| 8 | The markdown renderer had **no code-block or inline-code support at all** — for a RAG tool whose entire purpose is answering questions about source code, a fenced ` ```python ` block or `` `inline` `` reference rendered as plain paragraph text with literal backticks, no monospace font, no copy button | Read `chat.js`'s `renderMarkdownInto` and noticed it only handled `**bold**` and lists; confirmed live by asking a code-oriented question | Added fenced-code-block parsing (kept out of the paragraph/list pipeline, rendered in a bordered monospace panel with a "Copy" button) and inline `` `code` `` → `<code>` conversion, both still escape-first so the XSS-safety invariant is unchanged — verified live: asked for a real function's code, got a properly styled block with working syntax highlighting via monospace font, confirmed the copy button's `try`/`catch` degrades gracefully when clipboard permission is denied (this specific browser-automation pane denies `clipboard-write` by policy — `navigator.permissions.query` returned `"denied"` even on `https`-equivalent `isSecureContext: true` localhost — a tooling restriction, not a code defect; the same click in a real user-driven browser is the standard, always-granted "copy code" pattern used on GitHub and everywhere else) |
+| 9 | Any stray navigation (typo'd URL, stale bookmark) got FastAPI's bare `{"detail": "Not Found"}` JSON | `curl` against an unknown path | Added an exception handler that serves a small branded 404 page for browser navigations while leaving `/api/*` 404s as plain JSON (verified both paths with `curl` after restarting the server) |
+| 10 | No `prefers-reduced-motion` support despite several animations (message rise, thinking spinner, loading-dot pulse, modal fade/scale, sidebar slide) | Checked the stylesheet for the media query — absent | Added a query that collapses all animation/transition durations to near-zero when the user has reduced motion enabled |
+| 11 | No `:focus-visible` styling defined anywhere — buttons relied on whatever the browser's default outline happened to be, which is faint against this dark palette | Same stylesheet check | Added one deliberate, on-brand focus style (`outline: 2px solid var(--accent)`) applied globally via `:focus-visible`, confirmed visually by tabbing to the conversation switcher and screenshotting the result |
+| 12 | The rename/delete modal had `role="dialog" aria-modal="true"` but no `aria-labelledby`/`aria-describedby`, no focus trap (Tab could leave the modal into the page behind it), and the chat textarea had no accessible name (placeholder-only) | Read `index.html`/`chat.js` against the standard dialog pattern | Wired `aria-labelledby`/`aria-describedby` to the existing title/message elements, added a Tab/Shift+Tab focus trap and focus restoration to the previously-focused element on close, added a visually-hidden `<label>` for the textarea |
+
+### Live verification
+
+- **Contrast**: every foreground/background pair in the palette recomputed via the WCAG
+  relative-luminance formula (not eyeballed) before and after the fix; screenshots before and
+  after confirm the citations and thinking text are visibly more legible.
+- **Keyboard navigation**: tabbed to the conversation switcher, screenshotted the focus ring,
+  zoomed in to confirm both the outline and the (now always-in-the-DOM) delete icon appear on
+  focus, matching hover behavior.
+- **Mobile, real viewport testing**, not just a resized desktop window: 375×812 with a cleared
+  `localStorage` (simulating a genuine first visit) confirmed the sidebar starts collapsed,
+  the header title no longer overlaps the floating open button, and the backdrop both renders
+  and dismisses correctly on tap (confirmed via `document.elementFromPoint` plus a screenshot,
+  since one intermediate screenshot in this pane returned a stale frame before the state had
+  visibly updated).
+- **Code blocks and copy button**: asked two real questions against the live index — one the
+  model correctly abstained on (the exact route code wasn't in any ingested repo, so it said
+  so rather than inventing it, consistent with the anti-hallucination behavior verified
+  elsewhere in this document) and one it answered with a real fenced Python function pulled
+  from `Project-Management-Web-App`, rendering as a bordered monospace block with syntax-safe
+  escaping and a working copy affordance.
+- **404 page**: `curl` confirms `/api/*` unknown paths still return `{"detail": "..."}` JSON
+  (unchanged from before, so nothing that parses API errors broke), while a browser navigation
+  to an unknown path gets the new branded page — verified with a screenshot.
+- **No regressions**: full `pytest` suite (58 tests) re-run after every structural change in
+  this round and passed each time, including after the FastAPI exception-handler change (which
+  touches every route's error path, not just the 404 page itself).
+
+### Explicitly out of scope, and why
+
+Privacy Policy, Terms & Conditions, cookie consent, SEO meta tags/sitemap/social-preview
+image, analytics, CDN, load balancer, and spam/CAPTCHA protection were all requested by the
+original brief but don't apply to a single-user localhost tool with no visitors, no cookies,
+and no public traffic — writing them would mean fabricating practices this app doesn't have.
+Documented in [ARCHITECTURE.md](ARCHITECTURE.md) alongside the app's other deliberate scope
+boundaries (no auth, no Docker/CI), with an explicit note on what would need revisiting if
+this app is ever exposed beyond `127.0.0.1`.
+
+---
+
 ## Summary
 
 **58/58 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
@@ -617,7 +685,15 @@ real bugs through live browser testing (a native `prompt()` that silently doesn'
 this environment and is poor UX generally; a CSS specificity bug that kept a modal visible
 regardless of its `hidden` attribute; a minor label inconsistency) — all fixed and
 re-verified, plus an honestly-documented latency trade-off (streamed reasoning is
-measurably slower, by design). 5 more UI/UX bugs (including a markdown-rendering XSS
+measurably slower, by design). A production-polish audit (§11) then found 12 more real bugs
+through live browser and keyboard testing — 2 WCAG AA contrast failures (measured, not
+eyeballed), 2 completely keyboard-unreachable interactive elements (including the
+conversation switcher itself), a delete button invisible on any touchscreen, a mobile sidebar
+with no dismiss affordance, a header/button overlap bug present since before this round, a
+RAG-tool chat UI with no code-block rendering at all, a bare-JSON 404, missing
+`prefers-reduced-motion` support, and missing focus-visible styling — all fixed and
+re-verified live, including a full re-run of the automated suite after the FastAPI
+exception-handler change. 5 more UI/UX bugs (including a markdown-rendering XSS
 re-check) were found through live browser testing earlier in this project and fixed. 5
 dependency CVEs were found, investigated, and confirmed not exploitable in this deployment's
 configuration.

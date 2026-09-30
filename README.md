@@ -93,7 +93,11 @@ in live**, and the model's reasoning trace streams into a collapsible
 collapsed once the answer starts) — the same pattern Claude's own UI uses.
 Follow-up questions in the same conversation get the prior turns as context,
 so "what about its backend?" correctly resolves to whatever project you were
-just discussing.
+just discussing. Code in answers renders as real syntax-highlighted blocks
+with a copy button, not plain text with literal backticks. The UI passes a
+WCAG AA contrast check, is fully keyboard-navigable (including the
+conversation sidebar), and adapts to a phone-width screen — see
+[TESTING.md](TESTING.md) for the full accessibility/mobile audit.
 
 Note: showing the reasoning trace means Ollama runs with `think: true`,
 which is noticeably slower than the non-thinking default — qwen3:14b can take

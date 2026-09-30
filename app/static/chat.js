@@ -3,6 +3,7 @@ const collapseBtn = document.getElementById("collapse-btn");
 const openSidebarBtn = document.getElementById("open-sidebar-btn");
 const newChatBtn = document.getElementById("new-chat-btn");
 const conversationListEl = document.getElementById("conversation-list");
+const sidebarBackdrop = document.getElementById("sidebar-backdrop");
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
 const emptyStateEl = document.getElementById("empty-state");
@@ -12,6 +13,7 @@ const formEl = document.getElementById("chat-form");
 const questionEl = document.getElementById("question");
 const sendBtn = document.getElementById("send-btn");
 const modalOverlay = document.getElementById("modal-overlay");
+const modal = document.getElementById("modal");
 const modalTitle = document.getElementById("modal-title");
 const modalMessage = document.getElementById("modal-message");
 const modalInput = document.getElementById("modal-input");
@@ -34,9 +36,10 @@ function escapeHtml(str) {
 // Minimal, safe markdown rendering: HTML-escape FIRST, then only ever insert
 // our own hardcoded tags around already-escaped text -- nothing from the
 // model's output can inject real markup this way.
-function renderMarkdownInto(container, text) {
-  container.textContent = "";
-  const html = escapeHtml(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+function renderTextSegment(container, text) {
+  const html = escapeHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+?)`/g, "<code>$1</code>");
   const blocks = html.split(/\n\s*\n/);
   let currentList = null;
 
@@ -67,6 +70,58 @@ function renderMarkdownInto(container, text) {
   }
 }
 
+function renderCodeBlock(container, lang, code) {
+  const wrap = document.createElement("div");
+  wrap.className = "code-block";
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "code-copy-btn";
+  copyBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M5 15V6a1 1 0 0 1 1-1h9" stroke="currentColor" stroke-width="1.6"/></svg><span>Copy</span>';
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      const label = copyBtn.querySelector("span");
+      label.textContent = "Copied";
+      setTimeout(() => { label.textContent = "Copy"; }, 1500);
+    } catch {
+      // Clipboard API unavailable (e.g. no permission) -- button just won't confirm.
+    }
+  });
+
+  const pre = document.createElement("pre");
+  const codeEl = document.createElement("code");
+  if (lang) codeEl.className = `language-${lang}`;
+  codeEl.textContent = code; // textContent, not innerHTML -- no escaping needed or wanted here
+  pre.appendChild(codeEl);
+
+  wrap.appendChild(copyBtn);
+  wrap.appendChild(pre);
+  container.appendChild(wrap);
+}
+
+// Splits out ```fenced``` code blocks (rendered as monospace + a copy
+// button, never markdown-processed) before running the rest of the text
+// through the paragraph/list/bold/inline-code pipeline above.
+function renderMarkdownInto(container, text) {
+  container.textContent = "";
+  const fenceRe = /```(\w*)\n?([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+  let hadCodeBlock = false;
+
+  while ((match = fenceRe.exec(text)) !== null) {
+    hadCodeBlock = true;
+    const before = text.slice(lastIndex, match.index);
+    if (before.trim()) renderTextSegment(container, before);
+    renderCodeBlock(container, match[1], match[2].replace(/\n$/, ""));
+    lastIndex = fenceRe.lastIndex;
+  }
+  const rest = text.slice(lastIndex);
+  if (rest.trim() || !hadCodeBlock) renderTextSegment(container, rest);
+}
+
 function formatRelativeTime(iso) {
   const then = new Date(iso).getTime();
   const diffMs = Date.now() - then;
@@ -90,9 +145,14 @@ function autoResizeTextarea() {
 // embedding context) ----------
 
 let modalResolve = null;
+let modalPreviouslyFocused = null;
 
 function closeModal(result) {
   modalOverlay.hidden = true;
+  if (modalPreviouslyFocused) {
+    modalPreviouslyFocused.focus();
+    modalPreviouslyFocused = null;
+  }
   if (modalResolve) {
     modalResolve(result);
     modalResolve = null;
@@ -105,8 +165,10 @@ function openModal({ title, message, input, defaultValue, confirmLabel, danger }
   modalMessage.textContent = message || "";
   modalInput.hidden = !input;
   modalInput.value = defaultValue || "";
+  modalInput.setAttribute("aria-label", title);
   modalConfirm.textContent = confirmLabel || "OK";
   modalConfirm.className = "modal-btn " + (danger ? "danger" : "primary");
+  modalPreviouslyFocused = document.activeElement;
   modalOverlay.hidden = false;
 
   if (input) {
@@ -120,6 +182,25 @@ function openModal({ title, message, input, defaultValue, confirmLabel, danger }
     modalResolve = resolve;
   });
 }
+
+// Trap Tab focus inside the modal while it's open -- otherwise keyboard
+// users can tab straight through it into the sidebar/chat behind it.
+modal.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const focusable = Array.from(modal.querySelectorAll("button, input:not([hidden])")).filter(
+    (el) => el.offsetParent !== null
+  );
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+});
 
 async function promptModal(title, defaultValue) {
   const result = await openModal({ title, input: true, defaultValue, confirmLabel: "Save" });
@@ -144,11 +225,19 @@ document.addEventListener("keydown", (e) => {
 
 // ---------- sidebar ----------
 
-function setSidebarCollapsed(collapsed) {
+const MOBILE_BREAKPOINT = "(max-width: 820px)";
+
+function setSidebarCollapsed(collapsed, persist = true) {
   sidebar.classList.toggle("collapsed", collapsed);
   openSidebarBtn.hidden = !collapsed;
-  localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+  // Only shown as an overlay scrim below the 820px breakpoint (see
+  // style.css); harmless to toggle it unconditionally above that width
+  // since [hidden] wins there regardless.
+  sidebarBackdrop.hidden = collapsed || !window.matchMedia(MOBILE_BREAKPOINT).matches;
+  if (persist) localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
 }
+
+sidebarBackdrop.addEventListener("click", () => setSidebarCollapsed(true));
 
 function renderSources(container, sources) {
   if (!sources || sources.length === 0) return;
@@ -175,10 +264,12 @@ function buildThinkingBlock(open) {
   const wrap = document.createElement("div");
   wrap.className = "thinking" + (open ? " open" : "");
 
-  const toggle = document.createElement("div");
+  const toggle = document.createElement("button");
+  toggle.type = "button";
   toggle.className = "thinking-toggle";
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
   toggle.innerHTML =
-    '<svg viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
     '<span class="thinking-label">Thinking</span>';
   const spinner = document.createElement("div");
   spinner.className = "thinking-spinner";
@@ -187,7 +278,10 @@ function buildThinkingBlock(open) {
   const body = document.createElement("div");
   body.className = "thinking-body";
 
-  toggle.addEventListener("click", () => wrap.classList.toggle("open"));
+  toggle.addEventListener("click", () => {
+    const isOpen = wrap.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  });
 
   wrap.appendChild(toggle);
   wrap.appendChild(body);
@@ -214,17 +308,24 @@ function renderConversationList() {
     return;
   }
   for (const c of conversationsCache) {
+    // A plain container, not a button: it holds two independently-focusable
+    // controls (select + delete), and a <button> can't nest another
+    // <button> -- that's invalid HTML and screen readers handle it poorly.
     const item = document.createElement("div");
     item.className = "conversation-item" + (c.id === currentConversationId ? " active" : "");
-    item.title = c.title;
 
-    const title = document.createElement("span");
+    const title = document.createElement("button");
+    title.type = "button";
     title.className = "conversation-title";
     title.textContent = c.title;
+    title.title = c.title;
+    title.setAttribute("aria-current", c.id === currentConversationId ? "true" : "false");
+    title.addEventListener("click", () => selectConversation(c.id));
 
     const del = document.createElement("button");
+    del.type = "button";
     del.className = "conversation-delete";
-    del.setAttribute("aria-label", "Delete conversation");
+    del.setAttribute("aria-label", `Delete "${c.title}"`);
     del.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     del.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -233,7 +334,6 @@ function renderConversationList() {
 
     item.appendChild(title);
     item.appendChild(del);
-    item.addEventListener("click", () => selectConversation(c.id));
     conversationListEl.appendChild(item);
   }
 }
@@ -483,7 +583,15 @@ openSidebarBtn.addEventListener("click", () => setSidebarCollapsed(false));
 // ---------- init ----------
 
 (async function init() {
-  if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1") setSidebarCollapsed(true);
+  const storedCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+  if (storedCollapsed !== null) {
+    setSidebarCollapsed(storedCollapsed === "1", false);
+  } else if (window.matchMedia(MOBILE_BREAKPOINT).matches) {
+    // First visit with no saved preference: on a narrow viewport the
+    // sidebar is a full-width drawer, so default it closed rather than
+    // covering the chat with no indication there's content behind it.
+    setSidebarCollapsed(true, false);
+  }
   checkHealth();
   await loadConversations();
 
