@@ -83,15 +83,16 @@ def query(
     top_k: int,
     max_per_source: int = 3,
     pool_multiplier: int = 4,
+    where: dict[str, Any] | None = None,
 ) -> list[RetrievedChunk]:
     collection = get_collection()
     if collection.count() == 0:
         return []
     pool_size = min(top_k * pool_multiplier, collection.count())
-    result = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=pool_size,
-    )
+    kwargs: dict[str, Any] = {"query_embeddings": [query_embedding], "n_results": pool_size}
+    if where:
+        kwargs["where"] = where
+    result = collection.query(**kwargs)
     candidates: list[RetrievedChunk] = []
     docs = result.get("documents") or [[]]
     metas = result.get("metadatas") or [[]]
@@ -99,6 +100,13 @@ def query(
     for text, meta, dist in zip(docs[0], metas[0], dists[0]):
         candidates.append(RetrievedChunk(text=text, metadata=meta, distance=dist))
     return _diversify(candidates, top_k, max_per_source)
+
+
+def list_repo_names() -> list[str]:
+    """Distinct 'owner/repo' values currently indexed, for matching a
+    question against a specific repo by name."""
+    metas = list_metadatas({"source": "github"})
+    return sorted({m["repo"] for m in metas if m.get("repo")})
 
 
 def list_overview_chunks() -> list[RetrievedChunk]:

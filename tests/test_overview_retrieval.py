@@ -31,3 +31,18 @@ def test_does_not_misclassify_specific_questions():
         "How does the crawler handle redirects?",
     ]:
         assert not _is_overview_question(q), f"expected {q!r} to NOT be treated as an overview question"
+
+
+def test_recognizes_filter_count_and_summary_questions():
+    """Regression test: a live 20-question evaluation found these phrasings
+    all fell through to plain top-k search and gave incomplete/wrong
+    answers ("I don't have that information" for a question the corpus
+    could actually answer, or an answer covering only 1-2 of 9 repos)."""
+    for q in [
+        "How many projects do you know about?",
+        "What programming languages do I use across my projects?",
+        "Which of my projects use AI or machine learning?",
+        "Summarize my work as a developer.",
+        "Which of my projects use a database?",
+    ]:
+        assert _is_overview_question(q), f"expected {q!r} to be recognized as an overview question"

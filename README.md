@@ -109,6 +109,13 @@ stale-data purge logic, API input validation, and a live prompt-injection
 check against your running Ollama model (skipped automatically if Ollama
 isn't reachable).
 
+To spot-check answer *quality* rather than just correctness of the plumbing,
+run `python scripts/eval_run.py` — it asks one question per ingested repo
+plus 10 broad cross-repo questions against your live knowledge base and
+writes every answer, citation, and latency to `eval_results.md`. See
+[TESTING.md](TESTING.md) for a worked example, including two real bugs it
+caught and fixed.
+
 ## Project layout
 
 ```
