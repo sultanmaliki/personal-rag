@@ -56,7 +56,6 @@ header h1 {
   padding: 12px 14px;
   border-radius: 10px;
   line-height: 1.5;
-  white-space: pre-wrap;
   max-width: 90%;
 }
 
@@ -64,16 +63,44 @@ header h1 {
   align-self: flex-end;
   background: var(--accent);
   color: white;
+  white-space: pre-wrap;
 }
 
 .msg.assistant {
   align-self: flex-start;
   background: var(--panel);
   border: 1px solid var(--border);
+  white-space: normal;
 }
 
 .msg.assistant.pending {
   color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.msg.assistant p,
+.msg.assistant ol,
+.msg.assistant ul {
+  margin: 0 0 10px;
+}
+
+.msg.assistant p:last-child,
+.msg.assistant ol:last-child,
+.msg.assistant ul:last-child {
+  margin-bottom: 0;
+}
+
+.msg.assistant ol,
+.msg.assistant ul {
+  padding-left: 22px;
+}
+
+.msg.assistant li {
+  margin-bottom: 4px;
+}
+
+.msg.assistant li:last-child {
+  margin-bottom: 0;
 }
 
 .sources {

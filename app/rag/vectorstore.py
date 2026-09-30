@@ -101,6 +101,54 @@ def query(
     return _diversify(candidates, top_k, max_per_source)
 
 
+def list_overview_chunks() -> list[RetrievedChunk]:
+    """One representative chunk per distinct source (each GitHub repo's
+    README opening chunk, falling back to that repo's first indexed chunk if
+    it has no README; each website page's opening chunk).
+
+    Pure similarity search is the wrong tool for broad "what do you know"
+    style questions: a corpus can easily have most of its repos nowhere near
+    that phrasing in embedding space (confirmed by direct inspection -- see
+    TESTING.md), so top-k search under-samples the corpus no matter how the
+    pool/cap is tuned. This instead guarantees full-corpus coverage by
+    construction rather than by semantic luck.
+    """
+    collection = get_collection()
+
+    readme_result = collection.get(
+        where={"$and": [{"source": "github"}, {"path": "README.md"}, {"chunk_index": 0}]},
+        include=["documents", "metadatas"],
+    )
+    chunks = [
+        RetrievedChunk(text=doc, metadata=meta, distance=0.0)
+        for doc, meta in zip(readme_result.get("documents") or [], readme_result.get("metadatas") or [])
+    ]
+    covered_repos = {c.metadata["repo"] for c in chunks}
+
+    # Fallback for repos with no README.md: take each such repo's first
+    # indexed chunk (of whichever file happens to sort first) as its stand-in.
+    github_first_chunks = collection.get(
+        where={"$and": [{"source": "github"}, {"chunk_index": 0}]},
+        include=["documents", "metadatas"],
+    )
+    for doc, meta in zip(github_first_chunks.get("documents") or [], github_first_chunks.get("metadatas") or []):
+        repo = meta.get("repo")
+        if repo and repo not in covered_repos:
+            chunks.append(RetrievedChunk(text=doc, metadata=meta, distance=0.0))
+            covered_repos.add(repo)
+
+    website_result = collection.get(
+        where={"$and": [{"source": "website"}, {"chunk_index": 0}]},
+        include=["documents", "metadatas"],
+    )
+    chunks.extend(
+        RetrievedChunk(text=doc, metadata=meta, distance=0.0)
+        for doc, meta in zip(website_result.get("documents") or [], website_result.get("metadatas") or [])
+    )
+
+    return chunks
+
+
 def _where(metadata: dict[str, Any]) -> dict[str, Any]:
     if len(metadata) == 1:
         ((key, value),) = metadata.items()

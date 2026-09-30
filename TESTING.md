@@ -291,10 +291,78 @@ on the broad case (6/6 → 4/6 for the worst observed example).
 know"`, even a pool of the top 60 nearest neighbors (out of 4,028 total chunks) contains only
 3 distinct repos at all — 7 of the 10 ingested repos simply aren't semantically close to that
 phrasing in embedding space. No amount of pool/cap tuning alone can surface repos that
-aren't near the query in the first place; that would need a different retrieval strategy
-(e.g. query routing or a separate catalog-style answer path for meta-questions), which is a
-real, larger change and was not made here since it wasn't clearly the highest-value fix for
-this tool's primary use case (answering *specific* questions correctly).
+aren't near the query in the first place; that would need a different retrieval strategy —
+see the follow-up fix immediately below, which is exactly that different strategy.
+
+### Follow-up: dedicated overview-retrieval path (the residual limitation above, actually fixed)
+
+The diversity cap alone wasn't enough — a second live screenshot from the user, asking
+`"what do you know"`, still showed 6/6 citations from a single file. Root cause confirmed
+directly (not assumed): even the query's top-60 nearest neighbors contain only 3 of the 10
+repos, because pure cosine similarity to a vague phrase is structurally the wrong retrieval
+signal for a "survey the whole corpus" question — no pool/cap tuning fixes that.
+
+**Fix:** broad questions (`"what do you know"`, `"what projects have you indexed"`, etc. —
+detected via `pipeline._is_overview_question()`) now route to
+`vectorstore.list_overview_chunks()`, which returns one representative chunk per source by
+construction: each GitHub repo's README opening chunk (9/10 repos have one; the 10th,
+`personal-rag`, was genuinely empty at ingestion time — verified, not a bug), falling back to
+that repo's first indexed chunk otherwise, plus each website page's opening chunk. This
+guarantees full-corpus coverage instead of depending on semantic luck.
+
+**Before:**
+```
+Q: "what do you know"
+A: "Based on the information provided in the context, I know phrases and
+    sentences in a custom language, as seen in the data from the
+    Custom-Language-Translator repository..."
+Sources: 6/6 from Custom-Language-Translator:data/pairs.tsv
+```
+
+**After** (same question, live re-test):
+```
+Q: "what do you know"
+A: 1. Syed Mohammed Sultan — Cinematic Portfolio [1]: A high-performance,
+      interactive personal portfolio...
+   2. Nawayathi ⇄ English Translator [2]: A neural machine translator for
+      Nawayathi, a language spoken near Bhatkal, Karnataka...
+   3. QueryCraft AI [3]: An AI-powered database query assistant...
+   ... (9 items total, one per repo with a README)
+Sources: 9 distinct repos, one citation each
+```
+
+**Regression-checked:** re-ran the earlier specific QueryCraft-AI factual question
+(`"What programming language and framework..."`) after adding this routing — answer
+unchanged in quality (still correctly names TypeScript, Node.js/Express, and Next.js),
+confirming the new routing doesn't affect specific-question retrieval at all (it's a
+different code path entirely, only taken when `_is_overview_question()` matches).
+Regression-tested in `tests/test_overview_retrieval.py` (intent detection for both broad and
+specific phrasings — no false positives on the four specific questions used throughout this
+report).
+
+### Follow-up: markdown rendering in the chat UI
+
+Once answers got genuinely comprehensive, a real presentation bug surfaced: the model
+outputs proper markdown (`**bold**`, numbered lists), but the UI rendered everything via
+`textContent`, showing literal `**` asterisks instead of bold text, and separate numbered
+items instead of a continuous list.
+
+**Fix:** `app/static/chat.js` now HTML-escapes the raw answer text *first*, then applies a
+small set of safe transformations (bold, numbered/bulleted lists merged across blank-line
+breaks, paragraphs) that only ever insert hardcoded `<strong>`/`<li>`/`<ol>`/`<ul>`/`<p>`
+tags — never anything from the model's own output as raw HTML.
+
+**Re-verified XSS safety after this change** (this wasn't assumed safe just because the
+transform "looks" safe — tested directly): fed the renderer a payload combining both an
+untriggered `<img src=x onerror=...>` and a `<script>alert(1)</script>` embedded inside a
+`**bold**` span. Result: `xssFired: false`, and the rendered `innerHTML` shows both payloads
+as literal escaped text (`&lt;img ...&gt;`, `&lt;script&gt;...&lt;/script&gt;`) — the only
+real markup produced was the legitimate `<strong>` wrapper. Two real bugs caught by live
+testing (not just code review) while building this: the "thinking…" placeholder text wasn't
+cleared before appending real content (fixed: `container.textContent = ""` first), and each
+blank-line-separated numbered item was rendering as its own restarted `<ol>` — i.e. every
+item showed "1." (fixed: consecutive same-type list blocks now merge into one continuous
+list).
 
 ---
 
@@ -329,13 +397,15 @@ keeping a record of:
 
 ## Summary
 
-**30/30 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
+**32/32 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
 prompt injection) were found through active testing, fixed, and re-verified with passing
 regression tests. 1 confirmed data-integrity bug (stale chunks never purged) was found,
 fixed, and regression-tested. 1 confirmed retrieval-quality bug (single-source domination on
-broad queries, caught from a real user screenshot) was found, fixed, tuning-regression-tested
-against a second real query, and partially resolved with an honestly-documented residual
-limit. 3 UI/UX bugs were found through live browser testing and fixed. 5 dependency CVEs
-were found, investigated, and confirmed not exploitable in this deployment's configuration.
+broad queries, caught from two separate real user screenshots) went through two fix
+iterations — a diversity cap, then a dedicated overview-retrieval path once the cap alone
+proved insufficient — each verified against real live queries with no regression on specific
+questions. 5 UI/UX bugs (including a markdown-rendering XSS re-check) were found through live
+browser testing and fixed. 5 dependency CVEs were found, investigated, and confirmed not
+exploitable in this deployment's configuration.
 Zero hardcoded secrets found. Zero successful data exfiltration via the LLM (architecturally
 impossible, not just refused).**
