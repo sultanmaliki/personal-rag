@@ -392,6 +392,66 @@ keeping a record of:
 | `shutil.rmtree` on a re-cloned repo | `PermissionError: Access is denied` on git's read-only pack files (Windows-specific) | Custom `onexc` handler clears the read-only bit before retrying |
 | Embedding model "check for updates" network call | Multi-minute hang on process start even with the model already cached locally | Default to `HF_HUB_OFFLINE=1` once the model is confirmed present in the local HF cache |
 | Background ingestion appeared to hang | Python fully buffers stdout when not attached to a terminal — output looked stale for minutes while the process was actually working | Run ingestion scripts with `python -u` for real-time progress when backgrounding them |
+| crt.sh (subdomain discovery) rate-limits/502s frequently | Multiple back-to-back requests got 502s; a retry a few seconds later usually succeeds | Confirmed as inherent flakiness of a free community service, not our bug — real subdomains are now also listed explicitly in `.env`'s `WEBSITE_SEED_URLS` so ingestion doesn't depend on crt.sh's uptime |
+
+---
+
+### Website ingestion, finally run against the real site: two more real bugs found and fixed
+
+With the apex domain confirmed to have no A/AAAA record (§1 finding #12's follow-up) and two
+real subdomains confirmed live (`portfolio.syedmohammedsultan.online`,
+`link.syedmohammedsultan.online` — verified via direct `curl`/DNS-over-HTTPS lookups, then set
+as explicit `WEBSITE_SEED_URLS`), running the actual crawl against them surfaced two genuine
+bugs neither unit test caught, because both needed a real Cloudflare-fronted site to trigger:
+
+**Bug 1 — `robots.txt` fetched with the wrong User-Agent, silently blocking everything.**
+`RobotFileParser.read()` fetches robots.txt with its own bare `urllib` call using Python's
+default User-Agent — which Cloudflare's bot-management blocked with a real 403 (`error code:
+1010`), confirmed directly:
+```
+>>> urllib.request.urlopen(Request('https://portfolio.syedmohammedsultan.online/robots.txt'))
+HTTPError: 403 Forbidden
+b'error code: 1010\n'
+```
+A 403 on robots.txt is, by convention, correctly interpreted as "disallow everything" — so
+the crawler treated a site whose robots.txt explicitly says `Allow: /` as fully off-limits,
+with **no diagnostic output at all** (this is also what led to adding the "disallowed by
+robots.txt" skip-reason logging in the first place). Confirmed our own crawler's actual
+User-Agent was never blocked by the same site:
+```
+>>> requests.get(url, headers={'User-Agent': 'PersonalRAGBot/1.0 ...'})
+<Response [200]>
+```
+**Fix:** `_get_robot_parser()` now fetches robots.txt through the crawler's own `requests`
+session (correct UA) and feeds the content to `RobotFileParser.parse()` directly, instead of
+letting `read()` do its own fetch. Regression-tested with three cases (permissive content,
+403, 404) in `tests/test_website_security.py`.
+
+**Bug 2 — the same page crawled twice under two different URLs.**
+An explicit `.env` seed (`https://portfolio.syedmohammedsultan.online`, no trailing slash)
+and the same host rediscovered via crt.sh (built as `https://portfolio.syedmohammedsultan.online/`,
+always with one) were treated as two distinct pages by the `visited` set's exact-string
+comparison — doubling that page's chunks in the index (12 stored for 6 unique paragraphs).
+**Fix:** added `_normalize_url()` (canonicalizes trailing slashes) applied at the point a URL
+is popped from the crawl queue, so both forms collapse to one before being fetched or stored.
+Verified live: re-running ingestion after the fix crawled the page exactly once, and the
+already-built stale-page purge (§1 finding #4) automatically cleaned up the old duplicate
+entry from the prior run with no manual intervention:
+```
+purging stale page from index: https://link.syedmohammedsultan.online
+purging stale page from index: https://portfolio.syedmohammedsultan.online
+```
+
+**Result, verified by direct inspection of the stored chunks:** the live crawl now captures
+real, substantial content from `portfolio.syedmohammedsultan.online` — bio, skills, education,
+and project descriptions rendered server-side by Next.js (6 unique chunks, confirmed
+non-duplicated). `link.syedmohammedsultan.online` correctly captured only 1 thin chunk of
+boilerplate ("Loading…", header text) — confirmed by inspecting its raw HTML that this page's
+actual content (the link list) is rendered client-side via JavaScript after the initial page
+load, which a plain HTTP-GET crawler structurally cannot see. This is an honestly-documented
+limitation, not silently accepted: fetching that page's real content would need a
+JavaScript-rendering crawler (e.g. a headless browser), which is a materially larger
+dependency this tool doesn't currently carry.
 
 ---
 
@@ -476,7 +536,7 @@ won't see) rather than claimed as fully solved.
 
 ## Summary
 
-**38/38 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
+**42/42 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
 prompt injection) were found through active testing, fixed, and re-verified with passing
 regression tests. 1 confirmed data-integrity bug (stale chunks never purged) was found,
 fixed, and regression-tested. 1 confirmed retrieval-quality bug (single-source domination on
@@ -486,9 +546,13 @@ proved insufficient — each verified against real live queries with no regressi
 questions. A full 20-question evaluation (§9) then found 7 more real answer-quality bugs
 (1 per-repo retrieval failure, 1 hallucinated attribution, 5 incomplete/false-abstention
 broad answers) — 6 fully fixed and verified live, 1 measurably improved with an honest
-residual gap documented rather than glossed over. 5 UI/UX bugs (including a
-markdown-rendering XSS re-check) were found through live browser testing and fixed. 5
-dependency CVEs were found, investigated, and confirmed not exploitable in this deployment's
+residual gap documented rather than glossed over. Running the website crawler against the
+real, confirmed-live site then found 2 more real bugs (robots.txt fetched with the wrong
+User-Agent, silently blocking a Cloudflare-fronted site that explicitly allows crawling; the
+same page double-indexed under two URL forms) — both fixed and verified with a clean
+re-crawl. 5 UI/UX bugs (including a markdown-rendering XSS re-check) were found through live
+browser testing and fixed. 5 dependency CVEs were found, investigated, and confirmed not
+exploitable in this deployment's
 configuration.
 Zero hardcoded secrets found. Zero successful data exfiltration via the LLM (architecturally
 impossible, not just refused).**

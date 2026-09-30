@@ -9,6 +9,14 @@ from ingest import website_ingest as wi
 ROOT = "syedmohammedsultan.online"
 
 
+def test_normalize_url_collapses_trailing_slash_variants():
+    """Regression test: a live run double-crawled portfolio.<domain> because
+    an explicit .env seed (no trailing slash) and a crt.sh-discovered seed
+    (always has one) weren't recognized as the same page."""
+    assert wi._normalize_url("https://x.test") == wi._normalize_url("https://x.test/")
+    assert wi._normalize_url("https://x.test/page") == wi._normalize_url("https://x.test/page/")
+
+
 def test_same_site_accepts_root_and_subdomains():
     assert wi._same_site(ROOT, ROOT)
     assert wi._same_site(f"blog.{ROOT}", ROOT)
@@ -88,6 +96,51 @@ def test_fetch_capped_rejects_oversized_content_length(monkeypatch):
             return FakeResp()
 
     assert wi._fetch_capped(FakeSession(), "https://example/big") is None
+
+
+def test_get_robot_parser_uses_our_session_not_urllib_default(monkeypatch):
+    """Regression test: RobotFileParser.read() fetches with Python's default
+    urllib User-Agent, which got a real 403 from Cloudflare (bot-management)
+    even though our actual crawler UA was never blocked -- read() then
+    silently disallows the entire site. Fetching through our own session
+    (with our real UA) instead must correctly parse a permissive robots.txt."""
+
+    class FakeResp:
+        status_code = 200
+        text = "User-agent: *\nAllow: /\n"
+
+    class FakeSession:
+        def get(self, url, timeout):
+            return FakeResp()
+
+    rp = wi._get_robot_parser(FakeSession(), "https://example.test", {})
+    assert rp.can_fetch("AnyBot/1.0", "https://example.test/anything") is True
+
+
+def test_get_robot_parser_treats_403_as_disallow_all(monkeypatch):
+    class FakeResp:
+        status_code = 403
+        text = ""
+
+    class FakeSession:
+        def get(self, url, timeout):
+            return FakeResp()
+
+    rp = wi._get_robot_parser(FakeSession(), "https://example.test", {})
+    assert rp.can_fetch("AnyBot/1.0", "https://example.test/anything") is False
+
+
+def test_get_robot_parser_treats_404_as_allow_all(monkeypatch):
+    class FakeResp:
+        status_code = 404
+        text = ""
+
+    class FakeSession:
+        def get(self, url, timeout):
+            return FakeResp()
+
+    rp = wi._get_robot_parser(FakeSession(), "https://example.test", {})
+    assert rp.can_fetch("AnyBot/1.0", "https://example.test/anything") is True
 
 
 def test_fetch_capped_rejects_decompression_bomb_by_actual_size(monkeypatch):

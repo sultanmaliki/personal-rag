@@ -55,6 +55,18 @@ def _same_site(host: str, root_domain: str) -> bool:
     return host == root_domain or host.endswith(f".{root_domain}")
 
 
+def _normalize_url(url: str) -> str:
+    """Canonical form so 'https://x.com' and 'https://x.com/' aren't treated
+    as two different pages. Real bug found live: an explicit .env seed
+    (no trailing slash) and a crt.sh-discovered seed for the same host
+    (always built with a trailing slash) both crawled the same page,
+    doubling its chunks in the index under two different url metadata
+    values."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/") or "/"
+    return parsed._replace(path=path).geturl()
+
+
 @lru_cache(maxsize=256)
 def _resolves_to_public_ip(host: str) -> bool:
     """SSRF guard: reject hosts that resolve to a private/loopback/link-local
@@ -87,14 +99,34 @@ def _is_safe_url(url: str, root_domain: str) -> bool:
     return _resolves_to_public_ip(host)
 
 
-def _get_robot_parser(host_root: str, cache: dict[str, RobotFileParser]) -> RobotFileParser:
+def _get_robot_parser(
+    session: requests.Session, host_root: str, cache: dict[str, RobotFileParser]
+) -> RobotFileParser:
+    """Fetch and parse robots.txt through our own session (with our real
+    User-Agent) rather than RobotFileParser.read()'s built-in fetcher.
+
+    Real bug found live: RobotFileParser.read() uses a bare urllib call with
+    Python's default User-Agent, which Cloudflare's bot-management blocked
+    with a 403 (error 1010) even though our actual crawler UA was never
+    blocked. read() treats a 403 on robots.txt as "disallow everything" (the
+    correct, standard interpretation of an auth-gated robots.txt) -- so every
+    Cloudflare-fronted site got fully skipped despite explicitly allowing
+    crawling (`Allow: /`), and completely silently, since this happened
+    before any per-page diagnostic could fire."""
     if host_root not in cache:
         rp = RobotFileParser()
-        rp.set_url(urljoin(host_root, "/robots.txt"))
+        robots_url = urljoin(host_root, "/robots.txt")
+        rp.set_url(robots_url)
         try:
-            rp.read()
-        except Exception:
-            pass  # treat unreadable robots.txt as "allow all"
+            resp = session.get(robots_url, timeout=REQUEST_TIMEOUT)
+            if resp.status_code in (401, 403):
+                rp.disallow_all = True
+            elif resp.status_code >= 400:
+                rp.allow_all = True
+            else:
+                rp.parse(resp.text.splitlines())
+        except requests.RequestException:
+            pass  # unreachable robots.txt: RobotFileParser's default (unparsed) state is permissive
         cache[host_root] = rp
     return cache[host_root]
 
@@ -167,17 +199,19 @@ def crawl(seed_urls: list[str], root_domain: str, max_pages: int):
     pages_fetched = 0
 
     while queue and pages_fetched < max_pages:
-        url = queue.popleft().split("#")[0]
+        url = _normalize_url(queue.popleft().split("#")[0])
         if url in visited:
             continue
         visited.add(url)
         if not _is_safe_url(url, root_domain):
+            print(f"  skip {url} (failed safety check)")
             continue
 
         parsed = urlparse(url)
         host_root = f"{parsed.scheme}://{parsed.netloc}"
-        robots = _get_robot_parser(host_root, robots_cache)
+        robots = _get_robot_parser(session, host_root, robots_cache)
         if not robots.can_fetch(USER_AGENT, url):
+            print(f"  skip {url} (disallowed by robots.txt)")
             continue
 
         try:
@@ -187,13 +221,18 @@ def crawl(seed_urls: list[str], root_domain: str, max_pages: int):
             continue
 
         if fetched is None:
+            print(f"  skip {url} (fetch failed: too many redirects, size cap, or unsafe redirect target)")
             continue
         final_url, resp = fetched
         content_type = resp.headers.get("content-type", "")
         if resp.status_code >= 400 or "text/html" not in content_type:
+            print(f"  skip {url} (status {resp.status_code}, content-type {content_type!r})")
             continue
 
         title, text = extract_text(resp.text)
+        if not text:
+            print(f"  skip {url} (no extractable text -- likely a JS-rendered page with an empty static HTML body)")
+            continue
         pages_fetched += 1
         yield final_url, title, text
 
@@ -250,8 +289,6 @@ def ingest() -> None:
 
     kept_urls: set[str] = set()
     for url, title, text in crawl(seeds, config.website_root_domain, config.website_max_pages):
-        if not text:
-            continue
         kept_urls.add(url)
         metadata = {"source": "website", "url": url, "title": title}
         page_chunks = chunks_from_document(url, text, metadata)
