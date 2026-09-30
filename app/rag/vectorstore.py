@@ -48,21 +48,57 @@ def upsert(chunks: list[Chunk], embeddings: list[list[float]]) -> None:
     )
 
 
-def query(query_embedding: list[float], top_k: int) -> list[RetrievedChunk]:
+def _source_key(metadata: dict[str, Any]) -> str:
+    return metadata.get("repo") or metadata.get("url") or ""
+
+
+def _diversify(candidates: list[RetrievedChunk], top_k: int, max_per_source: int) -> list[RetrievedChunk]:
+    """Cap how many chunks from the same repo/page can occupy the final
+    top-k, so one large homogeneous file (e.g. a data file whose chunks are
+    all semantically similar to a broad question) can't monopolize every
+    citation. Candidates are assumed pre-sorted by relevance (closest
+    distance first); ties/overflow fall back to next-best regardless of
+    source once genuinely diverse options run out, so top_k is always filled
+    when enough candidates exist."""
+    selected: list[RetrievedChunk] = []
+    overflow: list[RetrievedChunk] = []
+    counts: dict[str, int] = {}
+
+    for chunk in candidates:
+        key = _source_key(chunk.metadata)
+        if counts.get(key, 0) < max_per_source:
+            selected.append(chunk)
+            counts[key] = counts.get(key, 0) + 1
+        else:
+            overflow.append(chunk)
+        if len(selected) >= top_k:
+            return selected[:top_k]
+
+    selected.extend(overflow[: top_k - len(selected)])
+    return selected[:top_k]
+
+
+def query(
+    query_embedding: list[float],
+    top_k: int,
+    max_per_source: int = 3,
+    pool_multiplier: int = 4,
+) -> list[RetrievedChunk]:
     collection = get_collection()
     if collection.count() == 0:
         return []
+    pool_size = min(top_k * pool_multiplier, collection.count())
     result = collection.query(
         query_embeddings=[query_embedding],
-        n_results=min(top_k, collection.count()),
+        n_results=pool_size,
     )
-    out: list[RetrievedChunk] = []
+    candidates: list[RetrievedChunk] = []
     docs = result.get("documents") or [[]]
     metas = result.get("metadatas") or [[]]
     dists = result.get("distances") or [[]]
     for text, meta, dist in zip(docs[0], metas[0], dists[0]):
-        out.append(RetrievedChunk(text=text, metadata=meta, distance=dist))
-    return out
+        candidates.append(RetrievedChunk(text=text, metadata=meta, distance=dist))
+    return _diversify(candidates, top_k, max_per_source)
 
 
 def _where(metadata: dict[str, Any]) -> dict[str, Any]:

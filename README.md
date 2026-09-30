@@ -68,7 +68,17 @@ no DNS record, etc.) so a zero-page crawl is never a silent mystery.
 
 ## 4. Run the assistant
 
+Every time after initial setup, you just need this (Ollama runs as a
+background app on Windows and stays up on its own):
+
+```powershell
+.\start.ps1
+```
+
+Or manually:
+
 ```bash
+.venv\Scripts\activate
 uvicorn app.main:app --reload
 ```
 
