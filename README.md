@@ -85,6 +85,22 @@ uvicorn app.main:app --reload
 Open http://localhost:8000 and start asking questions. Every answer cites the
 repo/file or URL it drew from.
 
+**Chat history** persists across restarts (SQLite, `data/conversations.db`) —
+past conversations live in the sidebar, click one to continue it, and the app
+remembers your last-open conversation across page reloads. **Answers stream
+in live**, and the model's reasoning trace streams into a collapsible
+"Thinking" panel above the answer (expanded while it's actively reasoning,
+collapsed once the answer starts) — the same pattern Claude's own UI uses.
+Follow-up questions in the same conversation get the prior turns as context,
+so "what about its backend?" correctly resolves to whatever project you were
+just discussing.
+
+Note: showing the reasoning trace means Ollama runs with `think: true`,
+which is noticeably slower than the non-thinking default — qwen3:14b can take
+60–100+ seconds on an ambiguous question as it reasons through multiple
+angles before answering. This is a deliberate trade-off (transparency over
+speed), not a bug; see [TESTING.md](TESTING.md) for measured examples.
+
 This binds to `127.0.0.1` (localhost-only) by default and has **no
 authentication** — that's intentional for a single-user local tool. If you
 ever run this with `--host 0.0.0.0` or expose it through a tunnel, add an
@@ -105,7 +121,10 @@ python -m pytest tests/
 
 Covers chunking edge cases, the SSRF defenses in the website crawler
 (redirect validation, private-IP blocking, response-size caps), the
-stale-data purge logic, API input validation, and a live prompt-injection
+stale-data purge logic, conversation persistence (SQLite CRUD, isolated from
+your real chat history), API input validation, a live end-to-end streaming
+test (asks a real question, confirms both turns persisted, asks a follow-up
+and confirms it reused the same conversation), and a live prompt-injection
 check against your running Ollama model (skipped automatically if Ollama
 isn't reachable).
 
@@ -120,8 +139,9 @@ caught and fixed.
 
 ```
 app/            FastAPI backend + static chat UI + RAG pipeline
+app/store/      SQLite conversation history (CRUD)
 ingest/         GitHub and website ingestion logic
 scripts/        CLI entry points for ingestion
 tests/          Regression test suite (pytest)
-data/           Cloned repos + Chroma index (gitignored, local only)
+data/           Cloned repos + Chroma index + conversations.db (gitignored, local only)
 ```

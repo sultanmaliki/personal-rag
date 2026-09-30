@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from app.config import config
 from app.rag import embeddings, llm, vectorstore
+
+# How many prior turns (user+assistant messages, not turn-pairs) to carry
+# into the model's context for conversational continuity. Capped to keep the
+# prompt bounded on a local model rather than growing unboundedly with a
+# long-running conversation.
+MAX_HISTORY_MESSAGES = 8
 
 
 @dataclass
@@ -18,6 +25,7 @@ class Source:
 class Answer:
     text: str
     sources: list[Source]
+    thinking: str = ""
 
 
 def _describe_source(metadata: dict) -> Source:
@@ -79,19 +87,41 @@ def _match_repo(question: str) -> str | None:
     return best
 
 
-def answer_question(question: str) -> Answer:
+def _retrieve(question: str) -> tuple[bool, list]:
+    """Returns (is_overview_mode, retrieved_chunks)."""
     overview = _is_overview_question(question)
     if overview:
-        retrieved = vectorstore.list_overview_chunks()
-    else:
-        query_vec = embeddings.embed_one(question)
-        matched_repo = _match_repo(question)
-        # "repo" is only ever set on github-sourced chunks, so this alone is
-        # an unambiguous single-key filter (Chroma's `where` needs no $and).
-        where = {"repo": matched_repo} if matched_repo else None
-        retrieved = vectorstore.query(query_vec, top_k=config.top_k, where=where)
-        if not retrieved and where:
-            retrieved = vectorstore.query(query_vec, top_k=config.top_k)
+        return True, vectorstore.list_overview_chunks()
+
+    query_vec = embeddings.embed_one(question)
+    matched_repo = _match_repo(question)
+    # "repo" is only ever set on github-sourced chunks, so this alone is an
+    # unambiguous single-key filter (Chroma's `where` needs no $and).
+    where = {"repo": matched_repo} if matched_repo else None
+    retrieved = vectorstore.query(query_vec, top_k=config.top_k, where=where)
+    if not retrieved and where:
+        retrieved = vectorstore.query(query_vec, top_k=config.top_k)
+    return False, retrieved
+
+
+def _build_context(retrieved: list) -> tuple[str, list[Source]]:
+    context_lines = []
+    sources: list[Source] = []
+    for i, chunk in enumerate(retrieved, start=1):
+        source = _describe_source(chunk.metadata)
+        sources.append(source)
+        context_lines.append(f"[{i}] ({source.label})\n{chunk.text}")
+    return "\n\n".join(context_lines), sources
+
+
+def _recent_history(history: list[dict] | None) -> list[dict]:
+    if not history:
+        return []
+    return history[-MAX_HISTORY_MESSAGES:]
+
+
+def answer_question(question: str, history: list[dict] | None = None) -> Answer:
+    overview, retrieved = _retrieve(question)
 
     if not retrieved:
         return Answer(
@@ -100,13 +130,31 @@ def answer_question(question: str) -> Answer:
             sources=[],
         )
 
-    context_lines = []
-    sources: list[Source] = []
-    for i, chunk in enumerate(retrieved, start=1):
-        source = _describe_source(chunk.metadata)
-        sources.append(source)
-        context_lines.append(f"[{i}] ({source.label})\n{chunk.text}")
+    context_block, sources = _build_context(retrieved)
+    result = llm.chat(question, context_block, comprehensive=overview, history=_recent_history(history))
+    return Answer(text=result.answer, sources=sources, thinking=result.thinking)
 
-    context_block = "\n\n".join(context_lines)
-    text = llm.chat(question, context_block, comprehensive=overview)
-    return Answer(text=text, sources=sources)
+
+def answer_question_stream(question: str, history: list[dict] | None = None) -> Iterator[dict]:
+    """Streaming counterpart to answer_question(). Yields the same
+    {"type": "thinking"|"content", "delta": str} events as llm.chat_stream(),
+    plus a final {"type": "done", "answer": str, "thinking": str,
+    "sources": list[Source]} event carrying the complete result."""
+    overview, retrieved = _retrieve(question)
+
+    if not retrieved:
+        text = (
+            "My knowledge base is empty. Run the ingestion scripts first "
+            "(scripts/ingest_github.py and scripts/ingest_website.py)."
+        )
+        yield {"type": "content", "delta": text}
+        yield {"type": "done", "answer": text, "thinking": "", "sources": []}
+        return
+
+    context_block, sources = _build_context(retrieved)
+    messages = llm.build_messages(question, context_block, comprehensive=overview, history=_recent_history(history))
+    for event in llm.chat_stream(messages):
+        if event["type"] == "done":
+            yield {"type": "done", "answer": event["answer"], "thinking": event["thinking"], "sources": sources}
+        else:
+            yield event

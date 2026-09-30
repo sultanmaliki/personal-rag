@@ -42,6 +42,7 @@ class Config:
     chroma_dir: Path = PROJECT_ROOT / os.getenv("CHROMA_DIR", "./data/chroma").lstrip("./")
     repos_dir: Path = PROJECT_ROOT / os.getenv("REPOS_DIR", "./data/repos").lstrip("./")
     collection_name: str = os.getenv("COLLECTION_NAME", "personal_knowledge")
+    conversations_db: Path = PROJECT_ROOT / os.getenv("CONVERSATIONS_DB", "./data/conversations.db").lstrip("./")
 
     # Embeddings
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")

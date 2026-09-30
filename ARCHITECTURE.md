@@ -25,10 +25,11 @@ flowchart TD
     end
 
     subgraph "Query time"
-        API[FastAPI /api/chat]
+        API[FastAPI /api/chat/stream<br/>SSE]
         RETR[pipeline.py<br/>embed query, top-k search]
-        LLM[llm.py<br/>Ollama, local model]
-        UI[Static chat UI<br/>HTML/JS]
+        LLM[llm.py<br/>Ollama, think: true,<br/>streamed thinking + content]
+        HIST[(SQLite<br/>conversations.db)]
+        UI[Static chat UI<br/>sidebar + streaming render]
     end
 
     GH --> GHI --> CHUNK
@@ -36,6 +37,7 @@ flowchart TD
     CHUNK --> EMBED --> STORE
     UI <--> API --> RETR --> STORE
     RETR --> LLM --> API
+    API <--> HIST
 ```
 
 ## Components
@@ -47,9 +49,10 @@ flowchart TD
 | Chunking | `app/rag/chunking.py` | Character-based sliding window with overlap, breaking on line boundaries where possible. Dependency-free by design (no tokenizer library needed for "roughly token-sized" chunks). |
 | Embeddings | `app/rag/embeddings.py` | Wraps a local `sentence-transformers` model (`BAAI/bge-small-en-v1.5` by default), cached as a singleton. Skips Hugging Face Hub's online freshness check once the model is confirmed cached, avoiding multi-minute hangs on a slow connection. |
 | Vector store | `app/rag/vectorstore.py` | Thin wrapper over Chroma's embedded `PersistentClient` — a local folder, no server process, no network listener. Exposes `upsert`, `query`, `delete_where`, `list_metadatas`. |
-| Retrieval + generation | `app/rag/pipeline.py`, `app/rag/llm.py` | Embeds the question, retrieves top-k chunks, builds a delimited `<context>` block, calls a local Ollama model with a system prompt that treats retrieved content as untrusted data and requires citations. |
-| API | `app/main.py` | FastAPI app: `/` serves the static chat UI, `/api/chat` answers questions (input length-capped), `/api/health` reports index size. `Cache-Control: no-cache` on static assets so UI edits are always picked up. |
-| UI | `app/static/` | Plain HTML/CSS/JS, no build step. Renders all content via `textContent`/`createElement` (never `innerHTML`) — no templating engine, no XSS surface. |
+| Retrieval + generation | `app/rag/pipeline.py`, `app/rag/llm.py` | Embeds the question, retrieves top-k chunks, builds a delimited `<context>` block, calls a local Ollama model (`think: true`) with a system prompt that treats retrieved content as untrusted data and requires citations. `llm.chat_stream()` yields `thinking`/`content` deltas as separate event types (Ollama exposes them as distinct fields when streaming, not `<think>` tags to scrape) plus prior conversation turns for continuity. |
+| Conversation history | `app/store/db.py`, `app/store/conversations.py` | SQLite (`data/conversations.db`), a fresh short-lived connection per call rather than one shared connection -- sidesteps sqlite3's thread-affinity rules for a low-concurrency local tool. Two tables: `conversations` (id, title, timestamps) and `messages` (role, content, thinking, sources as JSON). Schema creation is idempotent on every connect, so it doesn't depend on an explicit init step running first. |
+| API | `app/main.py` | FastAPI app: `/` serves the static chat UI, `/api/chat` answers questions non-streaming (input length-capped; used by scripts/tests), `/api/chat/stream` is the SSE endpoint the live UI uses -- streams thinking/content deltas, creates/persists the conversation and both messages, `/api/conversations*` is CRUD for chat history, `/api/health` reports index size. `Cache-Control: no-cache` on static assets so UI edits are always picked up. |
+| UI | `app/static/` | Plain HTML/CSS/JS, no build step, no external font/icon library (inline SVG). Sidebar with persistent conversation history, live SSE-driven streaming with a collapsible thinking panel, custom modal dialogs (no native `prompt()`/`confirm()` -- see [TESTING.md](TESTING.md) for why that mattered). Renders all model/user content via `textContent`/`createElement`/an escape-first markdown renderer (never raw `innerHTML` from untrusted text) -- no XSS surface. |
 
 ## Data flow
 
@@ -84,6 +87,14 @@ SOURCE (GitHub repo file / web page)
   [IDEA.md](IDEA.md)). Binding to `127.0.0.1` and never adding multi-user
   auth/rate-limiting is a deliberate scope boundary, not an oversight — documented explicitly
   in the README and in the audit's N/A section rather than left ambiguous.
+- **SQLite for conversation history, not another Chroma collection or a JSON file**: chat
+  history is relational (a conversation has many ordered messages) and needs simple filtering
+  (list by recency) — SQLite is the built-in, zero-dependency tool for exactly that, and
+  keeping it separate from the knowledge-base vector store keeps each store's job singular.
+- **Server-Sent Events, not WebSockets, for streaming**: the traffic is one-directional
+  (server → client, per request) and short-lived — SSE is the simpler primitive for that
+  shape and needs nothing beyond a `fetch()` + `ReadableStream` on the client, no extra
+  library or connection-lifecycle management.
 
 ## What's intentionally not here
 

@@ -534,9 +534,71 @@ won't see) rather than claimed as fully solved.
 
 ---
 
+## 10. Chat history, streaming, and a visible thinking process
+
+Added: persistent multi-conversation history (SQLite), live SSE streaming of answers, a
+collapsible "Thinking" panel showing the model's actual reasoning trace as it streams (the
+same pattern Claude's own UI uses), and a full visual redesign (sidebar, custom modals,
+proper design tokens instead of a flat dark box).
+
+### Real bugs found via live browser testing (not caught by unit tests)
+
+| # | Bug | How it was found | Fix |
+|---|---|---|---|
+| 1 | `prompt()` outright **doesn't work** in this testing environment (`Uncaught (in promise) Error: prompt() is not supported`), and native `confirm()`/`prompt()` are generally poor UX even in a real browser — unstyled, blocking, increasingly restricted by browsers | Clicking "rename" produced no visible dialog at all; console showed the real error | Built a proper in-app modal component (`openModal`/`promptModal`/`confirmModal` in `chat.js`) — styled consistently with the rest of the UI, keyboard-accessible (Enter/Escape), used for both rename and delete-confirmation |
+| 2 | The modal (and, it turns out, other `hidden`-toggled elements sharing the `.icon-btn` class) **never actually hid** — `.modal-overlay { display: flex }` and the browser's default `[hidden] { display: none }` have equal CSS specificity, and mine loaded later in the stylesheet, so it won every time regardless of the `hidden` attribute | First screenshot after wiring the modal showed it fully visible and empty on page load, before anything opened it | Added a global `[hidden] { display: none !important; }` override near the top of `style.css` — the standard, documented fix for this exact class-vs-attribute specificity collision |
+| 3 | Minor: a freshly-completed message showed "Thought process" as its thinking-panel label, but the *same* message reloaded from the store showed "Thinking" instead — two code paths (live-stream completion vs. `renderStoredMessage`) used different hardcoded strings | Spotted directly by comparing a live answer against the same conversation reloaded from the sidebar | Unified to a single label |
+
+### Real trade-off observed, not hidden
+
+Showing the reasoning trace requires `think: true`, and this measurably slows every answer —
+directly timed during this session:
+
+| Mode | Example question | Time |
+|---|---|---|
+| `think: false` (before this change) | "What language is QueryCraft-AI built with?" | ~24s |
+| `think: true` (after this change) | Same question, later session | ~100s, with the model visibly going back and forth on a genuine ambiguity (JS vs. TypeScript on the frontend) before settling on a hedged, honest answer |
+
+This is a deliberate trade-off made because it's what was asked for (see the actual answer
+quality point below), not an oversight — documented in the README rather than left as a
+silent regression. It does not affect retrieval quality (the same context/citations are
+produced either way), only generation latency, and the extra deliberation time visibly
+correlates with more careful, appropriately-hedged answers on genuinely ambiguous questions
+rather than confident guessing.
+
+### Live end-to-end verification (screenshots, not just automated tests)
+
+- **New conversation created and titled correctly** from the first question, appeared in the
+  sidebar immediately (before the answer even finished streaming).
+- **Thinking streamed token-by-token** into an auto-expanded, auto-scrolling panel, then
+  auto-collapsed the moment the actual answer started streaming — matching Claude's UI
+  behavior, verified visually across a full question, not assumed from the code.
+- **Multi-turn continuity, verified with a real follow-up**: after "What language is
+  QueryCraft-AI built with?", asked "And what about the frontend?" with no restatement of
+  "QueryCraft-AI" — the model correctly resolved "the frontend" from conversation history and
+  retrieved the right file (`querycraft-frontend/package.json`) for that specific follow-up.
+- **"Continue where you left off," the literal ask**: sent a question, then did a full
+  browser page reload (not just a client-side route change) — the app automatically
+  reopened the same conversation with full history intact, via a `localStorage`-remembered
+  conversation ID resolved against the real server-side list on load.
+- **Rename and delete**, both via the new custom modals: rename updated the header and
+  sidebar in place; delete's confirmation correctly warned before an irreversible action and
+  removed the conversation from both the sidebar and the server on confirm.
+
+### Automated coverage added
+
+16 new tests: `tests/test_conversations.py` (9 — CRUD, auto-titling, cascade delete, recency
+ordering, all against an isolated throwaway SQLite file, never the real `data/conversations.db`)
+and `tests/test_api.py` additions (7 — conversation endpoint wiring, 404s, and one live
+end-to-end test that streams a real question, asserts the SSE event shape, confirms both
+turns persisted, then asks a follow-up and confirms it reused the same conversation and
+history rather than starting fresh).
+
+---
+
 ## Summary
 
-**42/42 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
+**58/58 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
 prompt injection) were found through active testing, fixed, and re-verified with passing
 regression tests. 1 confirmed data-integrity bug (stale chunks never purged) was found,
 fixed, and regression-tested. 1 confirmed retrieval-quality bug (single-source domination on
@@ -550,9 +612,14 @@ residual gap documented rather than glossed over. Running the website crawler ag
 real, confirmed-live site then found 2 more real bugs (robots.txt fetched with the wrong
 User-Agent, silently blocking a Cloudflare-fronted site that explicitly allows crawling; the
 same page double-indexed under two URL forms) — both fixed and verified with a clean
-re-crawl. 5 UI/UX bugs (including a markdown-rendering XSS re-check) were found through live
-browser testing and fixed. 5 dependency CVEs were found, investigated, and confirmed not
-exploitable in this deployment's
+re-crawl. Adding chat history, streaming, and a visible thinking process (§10) found 3 more
+real bugs through live browser testing (a native `prompt()` that silently doesn't work in
+this environment and is poor UX generally; a CSS specificity bug that kept a modal visible
+regardless of its `hidden` attribute; a minor label inconsistency) — all fixed and
+re-verified, plus an honestly-documented latency trade-off (streamed reasoning is
+measurably slower, by design). 5 more UI/UX bugs (including a markdown-rendering XSS
+re-check) were found through live browser testing earlier in this project and fixed. 5
+dependency CVEs were found, investigated, and confirmed not exploitable in this deployment's
 configuration.
 Zero hardcoded secrets found. Zero successful data exfiltration via the LLM (architecturally
 impossible, not just refused).**
