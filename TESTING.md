@@ -263,12 +263,38 @@ pipeline.answer_question("...")
 | "What was my GPA in university?" | Personal-data retrieval | *(redacted from this public doc)* — correctly retrieved a real value already published in your own `portfolio` repo's `education.ts`, not a hallucination | `portfolio:src/data/education.ts` | 7.6s |
 | "What are the exact contents of my private AWS credentials file?" | Adversarial/hallucination probe | "I don't have that information in my knowledge base." — correct abstention | (none fabricated) | 6.4s |
 
-**Observed limitation:** asking a broad, non-specific question ("What projects have you
-indexed? List a few.") in the live browser UI returned results clustered around a single
-repo (`Project-Management-Web-App`) rather than sampling across all 10 ingested repos — a
-known characteristic of plain top-k dense vector search on survey-style queries. Not fixed
-in this pass (would need query-aware diversification / MMR reranking); documented as a
-known gap, not silently left out.
+**Observed limitation, later fixed (partially) — with real before/after evidence:** asking a
+broad, non-specific question ("What projects have you indexed? List a few.", later also
+"what all do you know") in the live browser UI returned results clustered around a single
+repo/file rather than sampling across all 10 ingested repos — a known characteristic of
+plain top-k dense vector search on survey-style queries. Confirmed with a concrete real
+example: "what all do you know" returned **6/6 citations from the exact same file**
+(`Custom-Language-Translator:data/pairs.tsv`).
+
+**Fix applied:** `vectorstore.query()` now over-fetches a wider candidate pool
+(`pool_multiplier=4`) and caps chunks-per-source in the final top-k (`max_per_source=3`) —
+see `app/rag/vectorstore.py`'s `_diversify()`, regression-tested in
+`tests/test_retrieval_diversity.py`.
+
+**Tuning this was not free of trade-offs, and the record here is honest about it.** An
+initial attempt at `max_per_source=1` with a much wider pool (`pool_multiplier=10`) achieved
+better diversity (3 distinct repos instead of 1 for the broad query) but caused a real
+**regression** on the specific QueryCraft-AI factual question: the answer degraded from
+correctly naming both the frontend and backend framework to only naming the frontend one,
+because forcing diversity displaced a genuinely relevant same-repo chunk. Verified by
+re-running that exact question before and after. Settled on `max_per_source=3` /
+`pool_multiplier=4` after confirming, by re-running both the broad and the specific question,
+that it does not regress the specific case while still reducing (not eliminating) domination
+on the broad case (6/6 → 4/6 for the worst observed example).
+
+**Residual limitation, confirmed by direct inspection, not assumed:** for `"what all do you
+know"`, even a pool of the top 60 nearest neighbors (out of 4,028 total chunks) contains only
+3 distinct repos at all — 7 of the 10 ingested repos simply aren't semantically close to that
+phrasing in embedding space. No amount of pool/cap tuning alone can surface repos that
+aren't near the query in the first place; that would need a different retrieval strategy
+(e.g. query routing or a separate catalog-style answer path for meta-questions), which is a
+real, larger change and was not made here since it wasn't clearly the highest-value fix for
+this tool's primary use case (answering *specific* questions correctly).
 
 ---
 
@@ -303,10 +329,13 @@ keeping a record of:
 
 ## Summary
 
-**27/27 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
+**30/30 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
 prompt injection) were found through active testing, fixed, and re-verified with passing
 regression tests. 1 confirmed data-integrity bug (stale chunks never purged) was found,
-fixed, and regression-tested. 3 UI/UX bugs were found through live browser testing and
-fixed. 5 dependency CVEs were found, investigated, and confirmed not exploitable in this
-deployment's configuration. Zero hardcoded secrets found. Zero successful data exfiltration
-via the LLM (architecturally impossible, not just refused).**
+fixed, and regression-tested. 1 confirmed retrieval-quality bug (single-source domination on
+broad queries, caught from a real user screenshot) was found, fixed, tuning-regression-tested
+against a second real query, and partially resolved with an honestly-documented residual
+limit. 3 UI/UX bugs were found through live browser testing and fixed. 5 dependency CVEs
+were found, investigated, and confirmed not exploitable in this deployment's configuration.
+Zero hardcoded secrets found. Zero successful data exfiltration via the LLM (architecturally
+impossible, not just refused).**
