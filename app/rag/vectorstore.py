@@ -112,7 +112,8 @@ def list_repo_names() -> list[str]:
 def list_overview_chunks() -> list[RetrievedChunk]:
     """One representative chunk per distinct source (each GitHub repo's
     README opening chunk, falling back to that repo's first indexed chunk if
-    it has no README; each website page's opening chunk).
+    it has no README; each website page's opening chunk; each local
+    document's opening chunk).
 
     Pure similarity search is the wrong tool for broad "what do you know"
     style questions: a corpus can easily have most of its repos nowhere near
@@ -152,6 +153,15 @@ def list_overview_chunks() -> list[RetrievedChunk]:
     chunks.extend(
         RetrievedChunk(text=doc, metadata=meta, distance=0.0)
         for doc, meta in zip(website_result.get("documents") or [], website_result.get("metadatas") or [])
+    )
+
+    document_result = collection.get(
+        where={"$and": [{"source": "document"}, {"chunk_index": 0}]},
+        include=["documents", "metadatas"],
+    )
+    chunks.extend(
+        RetrievedChunk(text=doc, metadata=meta, distance=0.0)
+        for doc, meta in zip(document_result.get("documents") or [], document_result.get("metadatas") or [])
     )
 
     return chunks

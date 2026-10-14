@@ -42,6 +42,7 @@ if you want to point this at a different GitHub account or domain.
 ```bash
 python scripts/ingest_github.py
 python scripts/ingest_website.py
+python scripts/ingest_documents.py
 ```
 
 - `ingest_github.py` lists every repo you own via `gh repo list`, shallow-clones
@@ -50,11 +51,17 @@ python scripts/ingest_website.py
 - `ingest_website.py` optionally discovers live subdomains via crt.sh
   (certificate-transparency logs — a passive lookup, not a scan), then crawls
   same-domain pages while respecting `robots.txt`, extracting readable text.
+- `ingest_documents.py` indexes whatever you drop into `info/` — PDF, Word
+  (`.docx`), plain text, and Markdown files, searched recursively through
+  subfolders. There's no gh/website equivalent of "discovery" here: you just
+  put files in the folder (resumes, notes, contracts, anything) and run the
+  script. `info/` is gitignored, same as `data/`, since it's for your own
+  local documents.
 
-Both scripts are safe to re-run — repos are re-cloned fresh, chunks are
-upserted by a stable ID so nothing duplicates, and stale entries (deleted
-files, renamed/removed repos, pages no longer reachable) are purged
-automatically on each run.
+All three scripts are safe to re-run — content is re-read/re-cloned fresh,
+chunks are upserted by a stable ID so nothing duplicates, and stale entries
+(deleted files, renamed/removed repos, pages no longer reachable, documents
+removed from `info/`) are purged automatically on each run.
 
 **Note on subdomain discovery:** `ingest_website.py` finds subdomains via
 crt.sh, a free community certificate-transparency mirror — it's best-effort
@@ -83,7 +90,7 @@ uvicorn app.main:app --reload
 ```
 
 Open http://localhost:8000 and start asking questions. Every answer cites the
-repo/file or URL it drew from.
+repo/file, URL, or document it drew from.
 
 **Chat history** persists across restarts (SQLite, `data/conversations.db`) —
 past conversations live in the sidebar, click one to continue it, and the app
@@ -113,8 +120,9 @@ auth layer first; as shipped it assumes only you can reach the port.
 ## Configuration
 
 All settings live in `.env` (see `.env.example` for the full list and defaults):
-GitHub username/fork inclusion, website domain/seed URLs/crawl limits, chunk
-size/overlap, retrieval top-k, and which embedding/Ollama model to use.
+GitHub username/fork inclusion, website domain/seed URLs/crawl limits, the
+local `info/` documents folder, chunk size/overlap, retrieval top-k, and
+which embedding/Ollama model to use.
 
 ## Testing
 
@@ -124,13 +132,14 @@ python -m pytest tests/
 ```
 
 Covers chunking edge cases, the SSRF defenses in the website crawler
-(redirect validation, private-IP blocking, response-size caps), the
-stale-data purge logic, conversation persistence (SQLite CRUD, isolated from
-your real chat history), API input validation, a live end-to-end streaming
-test (asks a real question, confirms both turns persisted, asks a follow-up
-and confirms it reused the same conversation), and a live prompt-injection
-check against your running Ollama model (skipped automatically if Ollama
-isn't reachable).
+(redirect validation, private-IP blocking, response-size caps), document
+ingestion (PDF/Word/text extraction, unsupported-format and size-limit
+skipping, a real `.docx` fixture), the stale-data purge logic, conversation
+persistence (SQLite CRUD, isolated from your real chat history), API input
+validation, a live end-to-end streaming test (asks a real question, confirms
+both turns persisted, asks a follow-up and confirms it reused the same
+conversation), and a live prompt-injection check against your running Ollama
+model (skipped automatically if Ollama isn't reachable).
 
 To spot-check answer *quality* rather than just correctness of the plumbing,
 run `python scripts/eval_run.py` — it asks one question per ingested repo
@@ -144,8 +153,9 @@ caught and fixed.
 ```
 app/            FastAPI backend + static chat UI + RAG pipeline
 app/store/      SQLite conversation history (CRUD)
-ingest/         GitHub and website ingestion logic
+ingest/         GitHub, website, and local-document ingestion logic
 scripts/        CLI entry points for ingestion
 tests/          Regression test suite (pytest)
 data/           Cloned repos + Chroma index + conversations.db (gitignored, local only)
+info/           Drop PDF/.docx/.txt/.md files here to index them (gitignored, local only)
 ```

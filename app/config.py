@@ -44,6 +44,9 @@ class Config:
     collection_name: str = os.getenv("COLLECTION_NAME", "personal_knowledge")
     conversations_db: Path = PROJECT_ROOT / os.getenv("CONVERSATIONS_DB", "./data/conversations.db").lstrip("./")
 
+    # Local documents (PDF/Word/text/Markdown dropped in by hand)
+    info_dir: Path = PROJECT_ROOT / os.getenv("INFO_DIR", "./info").lstrip("./")
+
     # Embeddings
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
@@ -60,3 +63,4 @@ class Config:
 config = Config()
 config.chroma_dir.mkdir(parents=True, exist_ok=True)
 config.repos_dir.mkdir(parents=True, exist_ok=True)
+config.info_dir.mkdir(parents=True, exist_ok=True)

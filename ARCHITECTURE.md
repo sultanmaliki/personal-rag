@@ -2,20 +2,22 @@
 
 ## Overview
 
-A local RAG pipeline with two independent ingestion sources feeding one shared vector store,
-queried by a small FastAPI backend and a static chat UI. Every component runs on the local
-machine; nothing is hosted or paid for.
+A local RAG pipeline with three independent ingestion sources feeding one shared vector
+store, queried by a small FastAPI backend and a static chat UI. Every component runs on the
+local machine; nothing is hosted or paid for.
 
 ```mermaid
 flowchart TD
     subgraph Sources
         GH[GitHub repos<br/>via gh CLI]
         WEB[Website + subdomains<br/>via crawler]
+        DOC[info/ folder<br/>PDF, Word, text, Markdown]
     end
 
     subgraph Ingestion
         GHI[github_ingest.py<br/>clone, walk, filter binaries]
         WEBI[website_ingest.py<br/>crawl, SSRF-checked, extract text]
+        DOCI[document_ingest.py<br/>extract text per format]
     end
 
     subgraph "Shared pipeline"
@@ -34,6 +36,7 @@ flowchart TD
 
     GH --> GHI --> CHUNK
     WEB --> WEBI --> CHUNK
+    DOC --> DOCI --> CHUNK
     CHUNK --> EMBED --> STORE
     UI <--> API --> RETR --> STORE
     RETR --> LLM --> API
@@ -46,6 +49,7 @@ flowchart TD
 |---|---|---|
 | GitHub ingestion | `ingest/github_ingest.py` | Lists repos via `gh repo list`, shallow-clones each via `gh repo clone`, walks files (skipping binaries/build output/dependencies by content-sniffing + extension), chunks, embeds, upserts. Purges chunks for repos/files no longer present on each run. |
 | Website ingestion | `ingest/website_ingest.py` | Discovers subdomains via crt.sh, crawls same-domain pages with SSRF protections (redirect re-validation, private-IP blocking, response-size caps) and `robots.txt` compliance, extracts readable text, chunks, embeds, upserts. Purges chunks for pages no longer reachable. |
+| Document ingestion | `ingest/document_ingest.py` | Walks `info/` recursively for PDF/`.docx`/`.txt`/`.md` files (size-capped at 20MB, unsupported formats and files that fail extraction are skipped without aborting the run), extracts text per format (`pypdf` for PDF, `python-docx` for Word), chunks, embeds, upserts. Purges chunks for files removed from `info/`. No network access at all -- purely local files the user places by hand. |
 | Chunking | `app/rag/chunking.py` | Character-based sliding window with overlap, breaking on line boundaries where possible. Dependency-free by design (no tokenizer library needed for "roughly token-sized" chunks). |
 | Embeddings | `app/rag/embeddings.py` | Wraps a local `sentence-transformers` model (`BAAI/bge-small-en-v1.5` by default), cached as a singleton. Skips Hugging Face Hub's online freshness check once the model is confirmed cached, avoiding multi-minute hangs on a slow connection. |
 | Vector store | `app/rag/vectorstore.py` | Thin wrapper over Chroma's embedded `PersistentClient` — a local folder, no server process, no network listener. Exposes `upsert`, `query`, `delete_where`, `list_metadatas`. |
@@ -57,8 +61,8 @@ flowchart TD
 ## Data flow
 
 ```
-SOURCE (GitHub repo file / web page)
-  → INGESTION (clone or fetch, with safety checks)
+SOURCE (GitHub repo file / web page / local document)
+  → INGESTION (clone, fetch, or read from disk, with safety checks)
   → CLEANING (binary detection, text extraction)
   → CHUNKING (overlap-aware splitting)
   → EMBEDDING (local sentence-transformers)
@@ -95,6 +99,11 @@ SOURCE (GitHub repo file / web page)
   (server → client, per request) and short-lived — SSE is the simpler primitive for that
   shape and needs nothing beyond a `fetch()` + `ReadableStream` on the client, no extra
   library or connection-lifecycle management.
+- **`pypdf`/`python-docx` for document text extraction, not legacy `.doc`/OCR support**: both
+  libraries extract text only (no macro execution, no embedded-object rendering) from modern,
+  well-specified formats. Legacy binary `.doc` and scanned/image-only PDFs are out of scope —
+  converting a `.doc` to `.docx` or exporting a scan through OCR first is on the user, not
+  something this tool silently attempts.
 
 ## What's intentionally not here
 

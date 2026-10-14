@@ -31,6 +31,10 @@ class Answer:
 def _describe_source(metadata: dict) -> Source:
     if metadata.get("source") == "github":
         return Source(label=f"{metadata['repo']}:{metadata['path']}", ref=metadata.get("url", ""))
+    if metadata.get("source") == "document":
+        # Local files have no meaningful URL to link to -- ref stays empty,
+        # which the UI already renders as plain (non-link) text.
+        return Source(label=metadata.get("path", "document"), ref="")
     return Source(label=metadata.get("title") or metadata.get("url", "web page"), ref=metadata.get("url", ""))
 
 

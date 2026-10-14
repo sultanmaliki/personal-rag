@@ -664,9 +664,73 @@ this app is ever exposed beyond `127.0.0.1`.
 
 ---
 
+## 12. Local document ingestion (`info/` folder)
+
+Added a third ingestion source alongside GitHub repos and the crawled website: an `info/`
+folder the user can drop PDF, Word (`.docx`), plain text, and Markdown files into, searched
+recursively through subfolders. Built to match the existing two ingesters exactly — same
+chunking/embedding pipeline, same content-addressed chunk IDs (`sha256(document:path:index)`),
+same stale-purge-on-re-run behavior, same "skip what fails, don't abort the whole run" posture
+for a malformed individual file.
+
+### Automated coverage
+
+9 new tests in `tests/test_document_ingest.py`: supported-format reading, unsupported-extension
+skipping, empty/oversized-file skipping, recursive subfolder walking, graceful handling of a
+file that fails text extraction (a corrupt `.pdf` doesn't abort the run), the
+PDF/`.docx`/text dispatch logic, a **real** `.docx` fixture built with `python-docx` itself
+(paragraphs + a table, not a mock), the stale-chunk purge logic, and a full isolated
+end-to-end `ingest()` run. One test bug was caught and fixed during this work: an early version
+of the oversized-file test patched `MAX_FILE_SIZE` to a value so small it also excluded the
+"normal" control file the test meant to keep, hiding what it was supposed to prove — fixed by
+picking a threshold that only excludes the intentionally-oversized file.
+
+### Live end-to-end verification (not just the unit tests)
+
+Rather than trust the test suite alone, ran the real ingestion script against the project's
+actual `data/chroma` index (4035 chunks from the real GitHub/website ingestion):
+
+1. Confirmed `config.info_dir` auto-creates the `info/` folder on import, matching the existing
+   `chroma_dir`/`repos_dir` pattern — no manual setup step needed.
+2. Dropped a real `.txt` file containing a unique marker phrase (`PURPLE-GIRAFFE-42`) into
+   `info/` and ran `python scripts/ingest_documents.py` for real — it found the file, chunked
+   it, and embedded it (confirmed in the script's own console output).
+3. Queried the real vector store directly (`embeddings.embed_one` + `vectorstore.query`) with a
+   question about the marker phrase — **the smoke-test document came back as the single closest
+   result** (cosine distance 0.221, clearly separated from the next-closest unrelated chunk at
+   0.339), correctly tagged `source: "document"`, with the exact original text intact.
+4. Confirmed `pipeline._describe_source()` labels a document-sourced chunk with the file's
+   relative path and an empty `ref` (no URL to link to, unlike GitHub/website sources) — the
+   chat UI's existing `renderSources()` already renders an empty `ref` as plain text rather than
+   a broken link, verified by reading that code path rather than assumed.
+5. Deleted the smoke-test file and re-ran ingestion: the purge logic correctly removed the
+   stale chunk (`purging stale document from index: _smoke_test.txt` in the console output),
+   and a direct vector-store check afterward confirmed **zero** leftover document-source chunks
+   and the index back at exactly 4035 chunks — the real knowledge base was left exactly as
+   found, no test cruft.
+6. Could not live-test the full chat path end-to-end (Ollama wasn't running in this session),
+   but the part that's actually new here — ingestion, chunking, embedding, storage, retrieval,
+   and source labeling — was verified for real, not assumed; the LLM-answer-generation step
+   downstream of retrieval is unchanged code, already covered by the existing live tests in §2
+   and §9.
+
+### Scope decisions, documented rather than left implicit
+
+- **Formats supported:** `.pdf`, `.docx`, `.txt`, `.md`. Legacy binary `.doc` (pre-2007 Word) and
+  scanned/image-only PDFs are explicitly out of scope — both would need OCR or a format
+  conversion step this tool doesn't attempt silently.
+- **`info/` is gitignored**, exactly like `data/` — these are the user's own local documents
+  (resumes, notes, contracts), never meant to be committed to a public repo.
+- **No network access anywhere in this ingestion path** — unlike the other two sources, this
+  one only ever reads local files the user placed there, so none of the SSRF-class concerns
+  that apply to `website_ingest.py` are relevant here.
+
+---
+
 ## Summary
 
-**58/58 automated tests pass. 2 confirmed security issues (SSRF via redirects, indirect
+**64/64 automated tests pass (3 additional live-Ollama tests skip automatically when Ollama
+isn't running, as documented in the Testing section above). 2 confirmed security issues (SSRF via redirects, indirect
 prompt injection) were found through active testing, fixed, and re-verified with passing
 regression tests. 1 confirmed data-integrity bug (stale chunks never purged) was found,
 fixed, and regression-tested. 1 confirmed retrieval-quality bug (single-source domination on
@@ -696,6 +760,10 @@ re-verified live, including a full re-run of the automated suite after the FastA
 exception-handler change. 5 more UI/UX bugs (including a markdown-rendering XSS
 re-check) were found through live browser testing earlier in this project and fixed. 5
 dependency CVEs were found, investigated, and confirmed not exploitable in this deployment's
-configuration.
+configuration. A third ingestion source (§12, local PDF/Word/text/Markdown documents dropped
+into `info/`) was added, built to the same content-addressed/stale-purge/skip-don't-abort
+pattern as the other two sources, and verified live against the real knowledge base rather
+than only the test suite -- including confirming the purge logic left the real index exactly
+as found afterward.
 Zero hardcoded secrets found. Zero successful data exfiltration via the LLM (architecturally
 impossible, not just refused).**
