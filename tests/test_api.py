@@ -65,6 +65,30 @@ def test_create_and_list_conversation():
     assert created["id"] in ids
 
 
+def test_create_conversation_rejects_cross_origin_request():
+    """Regression test for an audit-confirmed CSRF gap: create_conversation
+    has no request body, so it used to have nothing for FastAPI's body
+    validation to incidentally reject, letting a cross-origin
+    fetch(url, {method:'POST'}) silently create forged rows. A mismatched
+    Origin header must now be rejected explicitly."""
+    resp = client.post("/api/conversations", headers={"origin": "http://evil.example"})
+    assert resp.status_code == 403
+
+
+def test_create_conversation_allows_same_origin_request():
+    # A request with no Origin/Referer at all (the common case for a same-
+    # origin browser POST) must still work -- this guard only rejects a
+    # header that is present AND mismatched, never a missing one.
+    resp = client.post("/api/conversations", headers={"origin": str(client.base_url)})
+    assert resp.status_code == 200
+
+
+def test_delete_conversation_rejects_cross_origin_request():
+    conv_id = client.post("/api/conversations").json()["id"]
+    resp = client.delete(f"/api/conversations/{conv_id}", headers={"origin": "http://evil.example"})
+    assert resp.status_code == 403
+
+
 def test_get_conversation_returns_empty_message_list_for_new_chat():
     conv_id = client.post("/api/conversations").json()["id"]
     resp = client.get(f"/api/conversations/{conv_id}")

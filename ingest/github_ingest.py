@@ -82,12 +82,27 @@ def _looks_binary(raw: bytes) -> bool:
 
 
 def walk_files(repo_dir: Path):
+    repo_root = repo_dir.resolve()
     for path in repo_dir.rglob("*"):
+        # A git-tracked symlink (real on POSIX checkouts) pointing outside
+        # the clone would otherwise have its TARGET's content silently read
+        # and indexed -- never follow one, regardless of what it points at.
+        if path.is_symlink():
+            continue
         if path.is_dir():
             continue
         if any(part in EXCLUDED_DIRS for part in path.parts):
             continue
         if not _is_text_file(path):
+            continue
+        try:
+            # Defence in depth beyond the is_symlink() check above: a
+            # symlink could still slip through via a race or a component
+            # further up the path, so also verify the fully-resolved path
+            # never escapes the clone directory before reading it.
+            if not path.resolve().is_relative_to(repo_root):
+                continue
+        except OSError:
             continue
         try:
             raw = path.read_bytes()

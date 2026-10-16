@@ -9,11 +9,11 @@ the SSRF checks below before being followed.
 """
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import socket
 import time
 from collections import deque
-from functools import lru_cache
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -67,40 +67,89 @@ def _normalize_url(url: str) -> str:
     return parsed._replace(path=path).geturl()
 
 
-@lru_cache(maxsize=256)
-def _resolves_to_public_ip(host: str) -> bool:
-    """SSRF guard: reject hosts that resolve to a private/loopback/link-local
-    address, even if the hostname itself matches the allowed domain (e.g. a
-    stale or misconfigured DNS record pointing a subdomain at internal infra).
-    """
+def _resolve_public_ip(host: str) -> str | None:
+    """SSRF guard: resolve host and return its IP if that IP is public (not
+    private/loopback/link-local/reserved/multicast/unspecified), or None
+    otherwise -- even if the hostname itself matches the allowed domain
+    (e.g. a stale or misconfigured DNS record pointing a subdomain at
+    internal infra).
+
+    Deliberately uncached. A previous version memoized this verdict
+    indefinitely (@lru_cache) while the real HTTP client re-resolved the
+    hostname independently at connect time -- a DNS-rebinding attacker only
+    needed to change the DNS answer at any point during a multi-minute
+    crawl run to have later requests land on a different address than the
+    one that was validated. Returning the resolved IP (instead of just a
+    bool) lets the caller pin its connection to this exact address via
+    _pin_dns, so the validated address and the connected-to address can
+    never diverge."""
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
-        return False
+        return None
     if not infos:
-        return False
+        return None
     for _family, _type, _proto, _canon, sockaddr in infos:
         try:
             ip = ipaddress.ip_address(sockaddr[0])
         except ValueError:
-            return False
+            return None
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
-            return False
-    return True
+            return None
+    return infos[0][4][0]
 
 
-def _is_safe_url(url: str, root_domain: str) -> bool:
+@contextlib.contextmanager
+def _pin_dns(host: str, ip: str):
+    """For the duration of one connection attempt, force getaddrinfo()
+    lookups of `host` to return exactly the validated `ip`. The Host
+    header, TLS SNI, and certificate hostname verification all still
+    operate on `host` (nothing here touches the URL string), so HTTPS
+    correctness is preserved -- only the DNS answer used to open the
+    socket is constrained to the address that was just validated. Safe in
+    this single-threaded, synchronous crawler; not safe to use from
+    concurrent code without a lock."""
+    real_getaddrinfo = socket.getaddrinfo
+
+    def pinned(h, *args, **kwargs):
+        if h == host:
+            return real_getaddrinfo(ip, *args, **kwargs)
+        return real_getaddrinfo(h, *args, **kwargs)
+
+    socket.getaddrinfo = pinned
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
+
+
+def _is_safe_url(url: str, root_domain: str) -> tuple[bool, str | None]:
+    """Returns (is_safe, validated_ip). Callers that go on to fetch `url`
+    must pin their connection to validated_ip via _pin_dns rather than
+    letting the HTTP client re-resolve the hostname independently (see
+    _resolve_public_ip's docstring for why)."""
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_SCHEMES:
-        return False
-    host = parsed.netloc.split(":")[0].lower()
+        return False, None
+    if "@" in parsed.netloc:
+        # Reject embedded userinfo outright: legitimate crawl targets never
+        # need it, and it is the classic authority-confusion SSRF vector --
+        # parsed.netloc.split(':')[0] used to return the userinfo username
+        # here (e.g. "<root_domain>" in "<root_domain>:1234@evil-host")
+        # instead of the real host that requests/urllib3 actually connect
+        # to, letting a URL with a trusted-looking userinfo segment sail
+        # through both the domain allowlist and the public-IP check below
+        # while the real TCP connection went to an attacker-chosen host.
+        return False, None
+    host = (parsed.hostname or "").lower()
     if not host or not _same_site(host, root_domain):
-        return False
-    return _resolves_to_public_ip(host)
+        return False, None
+    ip = _resolve_public_ip(host)
+    return (ip is not None), ip
 
 
 def _get_robot_parser(
-    session: requests.Session, host_root: str, cache: dict[str, RobotFileParser]
+    session: requests.Session, host_root: str, host: str, ip: str, cache: dict[str, RobotFileParser]
 ) -> RobotFileParser:
     """Fetch and parse robots.txt through our own session (with our real
     User-Agent) rather than RobotFileParser.read()'s built-in fetcher.
@@ -118,7 +167,8 @@ def _get_robot_parser(
         robots_url = urljoin(host_root, "/robots.txt")
         rp.set_url(robots_url)
         try:
-            resp = session.get(robots_url, timeout=REQUEST_TIMEOUT)
+            with _pin_dns(host, ip):
+                resp = session.get(robots_url, timeout=REQUEST_TIMEOUT)
             if resp.status_code in (401, 403):
                 rp.disallow_all = True
             elif resp.status_code >= 400:
@@ -131,24 +181,26 @@ def _get_robot_parser(
     return cache[host_root]
 
 
-def _fetch_capped(session: requests.Session, url: str) -> requests.Response | None:
+def _fetch_capped(session: requests.Session, url: str, host: str, ip: str) -> requests.Response | None:
     """GET with a hard cap on response size, streamed so a lying/huge body
-    never gets fully buffered in memory."""
-    resp = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True)
-    declared_length = resp.headers.get("content-length")
-    if declared_length and int(declared_length) > MAX_RESPONSE_BYTES:
-        resp.close()
-        return None
-
-    chunks = []
-    total = 0
-    for chunk in resp.iter_content(chunk_size=65536):
-        total += len(chunk)
-        if total > MAX_RESPONSE_BYTES:
+    never gets fully buffered in memory. Pinned to the already-validated
+    `ip` for the duration of the connection (see _pin_dns)."""
+    with _pin_dns(host, ip):
+        resp = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True)
+        declared_length = resp.headers.get("content-length")
+        if declared_length and int(declared_length) > MAX_RESPONSE_BYTES:
             resp.close()
             return None
-        chunks.append(chunk)
-    resp._content = b"".join(chunks)  # populate .text/.json() from what we already read
+
+        chunks = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=65536):
+            total += len(chunk)
+            if total > MAX_RESPONSE_BYTES:
+                resp.close()
+                return None
+            chunks.append(chunk)
+        resp._content = b"".join(chunks)  # populate .text/.json() from what we already read
     return resp
 
 
@@ -156,13 +208,18 @@ def _fetch_following_safe_redirects(
     session: requests.Session, url: str, root_domain: str
 ) -> tuple[str, requests.Response] | None:
     """Manual redirect loop: every hop (not just the initial URL) is
-    re-validated, so a same-domain page can't 302 the crawler into fetching
-    localhost/an internal IP/a different domain."""
+    re-validated -- including a fresh DNS resolution pinned to the
+    connection -- so a same-domain page can't 302 the crawler into fetching
+    localhost/an internal IP/a different domain, and no cached verdict from
+    an earlier hop or an earlier page can go stale by the time this hop's
+    connection is actually opened."""
     current = url
     for _ in range(MAX_REDIRECTS + 1):
-        if not _is_safe_url(current, root_domain):
+        is_safe, ip = _is_safe_url(current, root_domain)
+        if not is_safe:
             return None
-        resp = _fetch_capped(session, current)
+        host = urlparse(current).hostname or ""
+        resp = _fetch_capped(session, current, host, ip)
         if resp is None:
             return None
         if resp.is_redirect or resp.is_permanent_redirect:
@@ -203,13 +260,15 @@ def crawl(seed_urls: list[str], root_domain: str, max_pages: int):
         if url in visited:
             continue
         visited.add(url)
-        if not _is_safe_url(url, root_domain):
+        is_safe, ip = _is_safe_url(url, root_domain)
+        if not is_safe:
             print(f"  skip {url} (failed safety check)")
             continue
 
         parsed = urlparse(url)
-        host_root = f"{parsed.scheme}://{parsed.netloc}"
-        robots = _get_robot_parser(session, host_root, robots_cache)
+        host = parsed.hostname or ""
+        host_root = f"{parsed.scheme}://{host}" + (f":{parsed.port}" if parsed.port else "")
+        robots = _get_robot_parser(session, host_root, host, ip, robots_cache)
         if not robots.can_fetch(USER_AGENT, url):
             print(f"  skip {url} (disallowed by robots.txt)")
             continue
@@ -261,7 +320,9 @@ def _diagnose_unsafe_seed(url: str, root_domain: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_SCHEMES:
         return f"scheme {parsed.scheme!r} is not http/https"
-    host = parsed.netloc.split(":")[0].lower()
+    if "@" in parsed.netloc:
+        return "URL contains userinfo (user:pass@host), which is rejected outright"
+    host = (parsed.hostname or "").lower()
     if not host or not _same_site(host, root_domain):
         return f"host {host!r} does not match {root_domain!r}"
     try:
@@ -283,7 +344,8 @@ def ingest() -> None:
 
     print(f"Crawling from {len(seeds)} seed URL(s), max {config.website_max_pages} pages...")
     for seed in seeds:
-        if not _is_safe_url(seed, config.website_root_domain):
+        is_safe, _ip = _is_safe_url(seed, config.website_root_domain)
+        if not is_safe:
             reason = _diagnose_unsafe_seed(seed, config.website_root_domain)
             print(f"  seed rejected: {seed} ({reason})")
 

@@ -4,7 +4,9 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from urllib.parse import urlsplit
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -43,6 +45,30 @@ class NoCacheStaticMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(NoCacheStaticMiddleware)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def _require_same_origin(request: Request) -> None:
+    """Reject a state-changing request whose Origin/Referer is present but
+    doesn't match this server's own origin.
+
+    This app has no other CSRF defense (no CORS allow-list, no auth, no
+    tokens) -- a full CSRF-token scheme would be disproportionate for a
+    single-user localhost tool, but relying on FastAPI's body/content-type
+    validation to incidentally block cross-origin POSTs turned out to be
+    exactly that: incidental. The one route with no Pydantic body model
+    (create_conversation) had nothing for that validation to reject, so a
+    bare cross-origin `fetch(url, {method:'POST'})` from a page open in
+    another tab could silently create forged conversation rows (a real,
+    audit-confirmed gap). This explicit check doesn't depend on a route's
+    body shape, so it can't be silently reopened by a future signature
+    change. A same-origin browser request may omit Origin/Referer
+    entirely for some methods, and this app has no session/credential for
+    a mismatch to actually steal, so only a *present-but-mismatched*
+    header is rejected -- this is a deliberate ambient-reachability guard,
+    not a replacement for real auth."""
+    header = request.headers.get("origin") or request.headers.get("referer")
+    if header is not None and urlsplit(header).netloc != request.url.netloc:
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
 
 
 class ChatRequest(BaseModel):
@@ -110,7 +136,7 @@ def health() -> dict:
     return {"ok": True, **vectorstore.stats()}
 
 
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(_require_same_origin)])
 def chat(req: ChatRequest) -> ChatResponse:
     """Non-streaming, stateless Q&A -- used by scripts/tests. The live UI
     uses /api/chat/stream instead, which also persists conversation history."""
@@ -126,7 +152,7 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
-@app.post("/api/chat/stream")
+@app.post("/api/chat/stream", dependencies=[Depends(_require_same_origin)])
 def chat_stream(req: ChatStreamRequest) -> StreamingResponse:
     is_new = not req.conversation_id or not conversations.conversation_exists(req.conversation_id)
     conversation_id = req.conversation_id if not is_new else conversations.create_conversation(req.question)
@@ -162,7 +188,7 @@ def list_conversations() -> list[ConversationOut]:
     return [ConversationOut(**vars(c)) for c in conversations.list_conversations()]
 
 
-@app.post("/api/conversations", response_model=ConversationOut)
+@app.post("/api/conversations", response_model=ConversationOut, dependencies=[Depends(_require_same_origin)])
 def create_conversation() -> ConversationOut:
     conv_id = conversations.create_conversation()
     summary = next(c for c in conversations.list_conversations() if c.id == conv_id)
@@ -191,13 +217,13 @@ def get_conversation(conversation_id: str) -> ConversationDetailOut:
     )
 
 
-@app.delete("/api/conversations/{conversation_id}")
+@app.delete("/api/conversations/{conversation_id}", dependencies=[Depends(_require_same_origin)])
 def delete_conversation(conversation_id: str) -> dict:
     conversations.delete_conversation(conversation_id)
     return {"ok": True}
 
 
-@app.patch("/api/conversations/{conversation_id}", response_model=ConversationOut)
+@app.patch("/api/conversations/{conversation_id}", response_model=ConversationOut, dependencies=[Depends(_require_same_origin)])
 def rename_conversation(conversation_id: str, req: RenameRequest) -> ConversationOut:
     if not conversations.conversation_exists(conversation_id):
         raise HTTPException(status_code=404, detail="Conversation not found")

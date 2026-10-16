@@ -727,10 +727,89 @@ actual `data/chroma` index (4035 chunks from the real GitHub/website ingestion):
 
 ---
 
+## 13. Applying the security-audit findings, and a live hallucination check
+
+Applied all 5 confirmed findings from the formal security audit:
+
+| # | Fix | File | Verified |
+|---|---|---|---|
+| 1 (high) | SSRF userinfo-authority bypass — `netloc.split(":")[0]` confused a URL's userinfo for its real host, letting a crafted `user:port@attacker-host` URL pass the domain allowlist while the real connection went elsewhere | `ingest/website_ingest.py` | New regression test + live crawl against the real configured domain |
+| 2 (medium) | SSRF DNS-rebind TOCTOU — the "is this host public" verdict was cached indefinitely (`@lru_cache`) while the real HTTP client re-resolved DNS independently at connect time | `ingest/website_ingest.py` | New regression test (mocked DNS answer changing between calls) + live crawl confirming real IPv6 resolution still works through the new pinning |
+| 3 (medium) | GitHub ingestion followed symlinks, reading files outside the cloned repo | `ingest/github_ingest.py` | Existing tests + a live check against a real cloned repo (QueryCraft-AI, 68 files) confirming normal indexing is unaffected |
+| 4 (low) | Bodyless `POST /api/conversations` had no CORS/body gate, letting a cross-origin page silently create forged conversation rows | `app/main.py` | New regression tests (cross-origin rejected 403, same-origin still works) |
+| 5 (low) | Dependencies were unpinned | `requirements.txt`, `requirements-dev.txt` | Pinned to the exact versions already installed and tested against |
+
+Fixes 1 and 2 touch the same functions, so they were combined into one rewrite of
+`ingest/website_ingest.py`: `_is_safe_url` now returns `(is_safe, validated_ip)` instead of a
+bare bool, host extraction uses `parsed.hostname` (not a naive `:`-split) and rejects any URL
+with embedded userinfo outright, and `_resolve_public_ip` (renamed from `_resolves_to_public_ip`,
+`@lru_cache` removed) returns the resolved IP so every caller can pin its connection to that
+exact address via a new `_pin_dns` context manager -- closing the gap between "what was
+validated" and "what was actually connected to" for both the main page fetch and the
+robots.txt fetch, on every redirect hop.
+
+The fix for #4 was applied as a `_require_same_origin` dependency on **every** mutating route
+(`/api/chat`, `/api/chat/stream`, and all three `/api/conversations` mutations), not just the
+one route the audit found gapped -- the audit's own observation was that the other routes'
+protection was incidental (a side effect of having a Pydantic body field), so leaving them
+unfixed would have left the same hole ready to reopen on any future signature change.
+
+### Live verification, not just the test suite
+
+- Ran the full suite after the rewrite: one test (`test_resolve_public_ip_is_not_cached_across_calls`)
+  failed on first run -- not a code bug, a test-authoring bug. It asserted `203.0.113.5` would
+  classify as "public," but that address is RFC 5737 TEST-NET-3 (reserved for documentation),
+  which Python's own `ipaddress` module correctly treats as non-global. Fixed by using a
+  genuinely public IP literal (the same one another passing test already used). All 75 tests
+  pass after the correction (ran with Ollama up, so every live-Ollama test executed for real
+  rather than skipping).
+- Ran a real, non-mocked crawl against the actual configured domain
+  (`portfolio.syedmohammedsultan.online`) through the fully rewritten `_is_safe_url` →
+  `_pin_dns` → `_fetch_capped` path: correctly resolved and pinned a real **IPv6** address
+  (`2606:4700:3031::6815:a8e`, a Cloudflare address, consistent with this site being
+  Cloudflare-fronted per §1), fetched the real page, and extracted real text -- confirming the
+  DNS-pinning rewrite works for IPv6 as well as IPv4 without any special-casing.
+- Ran `walk_files` against a real cloned repo (QueryCraft-AI, not a test fixture) and confirmed
+  it still finds all 68 files -- the new `is_symlink()`/containment checks don't affect
+  ordinary non-symlinked content.
+
+### Live hallucination / correctness check, against the real running system
+
+Four live questions against the real knowledge base and the real local Ollama model, each
+designed to have an independently-checkable ground truth:
+
+1. **A specific, verifiable fact** ("what LLM provider powers Project-Management-Web-App's
+   AI story generation, and how is it rate-limited/access-controlled?"). Ground truth
+   established by reading `backend/app/routers/ai.py` directly beforehand (not by trusting the
+   model): Groq, `check_rate_limit(..., limit=10, window_seconds=600)`, gated on
+   `require_manager`. The model's answer matched every detail exactly, including correctly
+   converting 600 seconds to "10 minutes" -- no fabricated detail.
+2. **The new local-document source** (a test file in `info/` containing the marker
+   `INDIGO-FALCON-77` and the number `8675309`). The model returned both values exactly,
+   cited to the right file with the correct empty `ref` (no URL for a local document, per
+   §12's fix).
+3. **A broad "what do you know overall" question** -- returned all 12 distinct real sources
+   (9 GitHub repos, 2 website pages, 1 local document) with no single-source domination,
+   confirming the overview-retrieval fix from §7/§9 still holds after this round of changes
+   and correctly includes the new document source.
+4. **A mixed in-scope/out-of-scope probe** ("what's the capital of France, and what was my
+   GPA in college?"). The model correctly stated the capital of France wasn't in its knowledge
+   base rather than guessing a plausible-sounding answer, while correctly answering the
+   in-scope half using a real value it found in the user's own `portfolio` repo source
+   (`src/data/education.ts`) -- not a fabrication, a genuine retrieval hit from the user's own
+   already-public portfolio code. This is the right behavior: abstain on what's absent, answer
+   accurately on what's present, don't blend the two into a hedged non-answer.
+
+No hallucination observed across any of the four checks. Test artifacts (`_smoke_test.txt`,
+`_verification_note.md`) were removed and the purge logic verified to leave the real index at
+exactly its original 4035-chunk count afterward.
+
+---
+
 ## Summary
 
-**64/64 automated tests pass (3 additional live-Ollama tests skip automatically when Ollama
-isn't running, as documented in the Testing section above). 2 confirmed security issues (SSRF via redirects, indirect
+**75/75 automated tests pass (live-Ollama tests skip automatically when Ollama isn't running,
+as documented in the Testing section above). 2 confirmed security issues (SSRF via redirects, indirect
 prompt injection) were found through active testing, fixed, and re-verified with passing
 regression tests. 1 confirmed data-integrity bug (stale chunks never purged) was found,
 fixed, and regression-tested. 1 confirmed retrieval-quality bug (single-source domination on
@@ -764,6 +843,14 @@ configuration. A third ingestion source (§12, local PDF/Word/text/Markdown docu
 into `info/`) was added, built to the same content-addressed/stale-purge/skip-don't-abort
 pattern as the other two sources, and verified live against the real knowledge base rather
 than only the test suite -- including confirming the purge logic left the real index exactly
-as found afterward.
+as found afterward. A formal multi-agent security audit then found 5 more real issues (§13) --
+1 high-severity SSRF allowlist bypass, 2 medium (a second SSRF gap, GitHub symlink file
+disclosure), 2 low (CSRF on a bodyless route, unpinned dependencies) -- all 5 fixed, covered by
+new regression tests, and verified against real live traffic (a real crawl of the configured
+domain including correct IPv6 handling, a real cloned repo's file walk). A follow-up live
+correctness check against the real running system and real Ollama model, designed around
+independently-verified ground truth rather than trusting the model's own claims, found zero
+hallucination across four targeted questions spanning all three ingestion sources plus an
+honest-abstention probe.
 Zero hardcoded secrets found. Zero successful data exfiltration via the LLM (architecturally
 impossible, not just refused).**
