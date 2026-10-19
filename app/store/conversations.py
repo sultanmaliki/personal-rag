@@ -36,7 +36,7 @@ def _now() -> str:
 def _auto_title(first_message: str) -> str:
     title = " ".join(first_message.split())  # collapse whitespace/newlines
     if len(title) > MAX_AUTO_TITLE_LENGTH:
-        title = title[:MAX_AUTO_TITLE_LENGTH].rstrip() + "…"
+        title = title[: MAX_AUTO_TITLE_LENGTH - 1].rstrip() + "…"
     return title or "New chat"
 
 
