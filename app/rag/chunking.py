@@ -30,6 +30,6 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
             chunks.append(chunk)
         if end >= n:
             break
-        start = end + step
+        start += step
 
     return chunks
