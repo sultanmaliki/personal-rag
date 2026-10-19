@@ -1,4 +1,18 @@
+import pytest
+
 from app.rag.chunking import chunk_text
+
+
+def test_rejects_overlap_not_smaller_than_chunk_size():
+    with pytest.raises(ValueError):
+        chunk_text("some text", chunk_size=100, overlap=100)
+    with pytest.raises(ValueError):
+        chunk_text("some text", chunk_size=100, overlap=150)
+
+
+def test_rejects_non_positive_chunk_size():
+    with pytest.raises(ValueError):
+        chunk_text("some text", chunk_size=0, overlap=0)
 
 
 def test_empty_text_produces_no_chunks():
