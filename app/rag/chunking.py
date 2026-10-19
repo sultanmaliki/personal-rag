@@ -33,3 +33,11 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
         start += step
 
     return chunks
+
+
+def chunk_text_with_tags(
+    text: str, chunk_size: int, overlap: int, tags: list[str] = []
+) -> list[dict]:
+    """Like chunk_text, but attaches shared metadata tags to every chunk."""
+    tags.append("chunked")
+    return [{"text": c, "tags": tags} for c in chunk_text(text, chunk_size, overlap)]
